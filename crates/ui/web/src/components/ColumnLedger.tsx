@@ -1,9 +1,21 @@
+import { useRouter, useRouterState } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useState } from "react";
 
 import { ColumnHeader } from "./ColumnHeader";
 import { ColumnPicker } from "./ColumnPicker";
 import { useColumnPrefs } from "./columnPrefs";
-import { type ColumnSpec, fitWidths, tableMinWidth, visibleColumns } from "./tableColumns";
+import {
+  type ColumnSpec,
+  type SortValue,
+  type TableSort,
+  fitWidths,
+  nextSort,
+  parseSort,
+  sortParam,
+  sortRows,
+  tableMinWidth,
+  visibleColumns,
+} from "./tableColumns";
 
 /** Attributes a row may carry: its kind for the stripe, a state for styling. */
 type RowAttributes = Record<`data-${string}`, string | undefined>;
@@ -21,6 +33,17 @@ export interface ColumnLedgerProps<Row, Id extends string> {
   rowProps?: ((row: Row) => RowAttributes) | undefined;
   /** One cell's content. A `switch` over `Id`, so a new column cannot go undrawn. */
   cell: (row: Row, id: Id) => ReactNode;
+  /**
+   * What a sortable column (`ColumnSpec.sort`) orders by in one row — a
+   * `switch` over `Id` like `cell`; `null` for none. Without it (or
+   * `serverSorted`) no column sorts.
+   */
+  sortValue?: ((row: Row, id: Id) => SortValue) | undefined;
+  /**
+   * The rows arrive already in `?sort=` order (the server pages them): the
+   * headers show the sort, and the rows are drawn as they came.
+   */
+  serverSorted?: boolean | undefined;
 }
 
 /**
@@ -33,6 +56,10 @@ export interface ColumnLedgerProps<Row, Id extends string> {
  * column's edge changes that column and nothing else; the ones after it move
  * along, and the last gives or takes the difference. Text
  * in a cell still wraps (names break at `/` and `-`); nothing is cut off.
+ *
+ * A column that declares a `sort` has its header as a button: the order is
+ * the page's `?sort=` (one table per page), so it can be shared and Back
+ * undoes it. Changing it drops `offset` — a new order starts at its top.
  */
 export function ColumnLedger<Row, Id extends string>({
   id,
@@ -43,8 +70,17 @@ export function ColumnLedger<Row, Id extends string>({
   rowKey,
   rowProps,
   cell,
+  sortValue,
+  serverSorted = false,
 }: ColumnLedgerProps<Row, Id>) {
   const prefs = useColumnPrefs(id);
+  const sorts = sortValue !== undefined || serverSorted;
+  const sortable = sorts ? columns : [];
+  const [sort, setSort] = useTableSort(sortable);
+  const shown =
+    serverSorted || sortValue === undefined
+      ? rows
+      : sortRows(rows, sort, (row, column) => sortValue(row, column as Id));
   const visible = visibleColumns(columns, prefs);
   const [card, setCard] = useState<HTMLDivElement | null>(null);
   const widths = fitWidths(visible, prefs, useCardWidth(card));
@@ -84,12 +120,16 @@ export function ColumnLedger<Row, Id extends string>({
                   spec={spec}
                   width={widths[i] ?? spec.width}
                   last={i === visible.length - 1}
+                  sort={sorts ? (sort?.id === spec.id ? sort : null) : undefined}
+                  onSort={() => {
+                    setSort(nextSort(sort, spec));
+                  }}
                 />
               ))}
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
+            {shown.map((row) => (
               <tr key={rowKey(row)} {...rowProps?.(row)}>
                 {visible.map((spec) => (
                   <td key={spec.id} className={cellClass(spec)}>
@@ -103,6 +143,32 @@ export function ColumnLedger<Row, Id extends string>({
       </div>
     </div>
   );
+}
+
+/**
+ * The page's `?sort=`, read against this table's columns, and how to change
+ * it. Each change is a history entry, so Back steps through the sorts; the
+ * page keeps its place.
+ */
+function useTableSort(
+  columns: readonly ColumnSpec[],
+): [TableSort | null, (next: TableSort | null) => void] {
+  const router = useRouter();
+  const location = useRouterState({ select: (s) => s.location });
+  const search = location.search as Record<string, unknown>;
+  const sort = parseSort(search.sort, columns);
+  const set = (next: TableSort | null) => {
+    const rest = Object.fromEntries(
+      Object.entries(search).filter(([key]) => key !== "sort" && key !== "offset"),
+    );
+    const param = sortParam(next);
+    void router.navigate({
+      to: location.pathname,
+      search: (param === undefined ? rest : { ...rest, sort: param }) as never,
+      resetScroll: false,
+    });
+  };
+  return [sort, set];
 }
 
 /**

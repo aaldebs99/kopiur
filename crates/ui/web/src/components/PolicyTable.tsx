@@ -4,12 +4,13 @@ import type { PolicyRow } from "../api/types";
 import { relativeTime } from "../util/format";
 import { ColumnLedger } from "./ColumnLedger";
 import { LampBadge } from "./HealthBadge";
-import { healthLamp, loudLamp } from "./health";
+import { healthLamp, healthRank, loudLamp } from "./health";
 import { snapshotCount } from "./policy";
 import { KindChip } from "./KindMark";
 import { WireRef } from "./ObjectRef";
 import { InspectLink } from "./InspectLink";
-import type { ColumnSpec } from "./tableColumns";
+import { type SortValue, nameValue, timeValue } from "./tableColumns";
+import { POLICY_COLUMNS, type PolicyColumn } from "./listColumns";
 
 /**
  * Every `SnapshotPolicy` in scope: what it writes into, whether it is
@@ -28,23 +29,6 @@ export interface PolicyTableProps {
   now?: Date | undefined;
 }
 
-type PolicyColumn =
-  | "policy"
-  | "writesInto"
-  | "state"
-  | "lastSnapshot"
-  | "lastVerified"
-  | "snapshots";
-
-const POLICY_COLUMNS: readonly ColumnSpec<PolicyColumn>[] = [
-  { id: "policy", label: "Policy", width: 300, min: 220, locked: true, stripe: true },
-  { id: "writesInto", label: "Writes into", width: 260, min: 220 },
-  { id: "state", label: "State", width: 140, min: 140 },
-  { id: "lastSnapshot", label: "Last snapshot", width: 180, min: 180 },
-  { id: "lastVerified", label: "Last verified", width: 180, min: 180 },
-  { id: "snapshots", label: "Snapshots", width: 110, min: 110, numeric: true },
-];
-
 export function PolicyTable({ policies, now = new Date() }: PolicyTableProps) {
   return (
     <ColumnLedger
@@ -56,8 +40,28 @@ export function PolicyTable({ policies, now = new Date() }: PolicyTableProps) {
       rowKey={(p) => `${p.namespace}/${p.name}`}
       rowProps={() => ({ "data-kind": "snapshot-policy" })}
       cell={(policy, id) => policyCell(policy, id, now)}
+      sortValue={policySortValue}
     />
   );
+}
+
+function policySortValue(policy: PolicyRow, id: PolicyColumn): SortValue {
+  switch (id) {
+    case "policy":
+      return nameValue(policy.name, policy.namespace);
+    case "state":
+      return healthRank(policy.suspended ? "suspended" : "healthy");
+    case "lastSnapshot":
+      return timeValue(policy.lastSuccessfulSnapshot);
+    case "lastVerified":
+      return timeValue(policy.lastVerified);
+    case "snapshots":
+      return policy.activeSnapshotCount ?? null;
+    case "writesInto":
+      return null;
+    default:
+      return id satisfies never;
+  }
 }
 
 function policyCell(policy: PolicyRow, id: PolicyColumn, now: Date): ReactNode {

@@ -1188,6 +1188,46 @@ a.object-name:hover {
   text-overflow: ellipsis;
 }
 
+/* A sortable column's words: a quiet button the width of its label. The
+   arrow sits in the header's leading padding, before the words, so it takes
+   no width from a narrow column; it is lit on the sorted column and shown on
+   the others only when pointed at or focused. */
+.ledger__sort {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  text-align: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.ledger__sort:hover,
+.ledger__sort[data-sorted] {
+  color: var(--fg);
+}
+
+.ledger__sort-icon {
+  position: absolute;
+  top: 50%;
+  right: 100%;
+  margin-right: 1px;
+  transform: translateY(-50%);
+  opacity: 0;
+}
+
+.ledger__sort[data-sorted] .ledger__sort-icon,
+.ledger__sort:hover .ledger__sort-icon,
+.ledger__sort:focus-visible .ledger__sort-icon {
+  opacity: 1;
+}
+
 /* The resize handle: a strip along the header's right edge, wide enough to
    catch, drawn as a hairline that brightens when it is held or focused. */
 .ledger__resize {

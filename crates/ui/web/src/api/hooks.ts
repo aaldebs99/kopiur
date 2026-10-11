@@ -161,6 +161,8 @@ export interface SnapshotListParams {
   q?: string | undefined;
   offset?: number | undefined;
   limit?: number | undefined;
+  /** The column to order by before paging (`-size` for descending); absent is newest first. */
+  sort?: string | undefined;
 }
 
 /** `GET /api/v1/doctor` controls (addenda item 12: these live here, not on `/status`). */

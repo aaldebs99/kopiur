@@ -18,7 +18,9 @@ import { KindChip, KindName } from "./KindMark";
 import { KIND_META } from "./kind";
 import { useCapabilityReason } from "./useCapabilityReason";
 import { InspectLink } from "./InspectLink";
-import type { ColumnSpec } from "./tableColumns";
+import { type SortValue, nameValue, timeValue } from "./tableColumns";
+import { REPLICATION_COLUMNS, type ReplicationColumn } from "./listColumns";
+import { healthLamp, healthRank } from "./health";
 
 /**
  * Both replication kinds in one ledger, worst question first: how far behind
@@ -46,25 +48,6 @@ function replicationKind(row: ReplicationRow): "repositoryReplication" | "snapsh
   return row.kind === "RepositoryReplication" ? "repositoryReplication" : "snapshotReplication";
 }
 
-type ReplicationColumn =
-  | "replication"
-  | "state"
-  | "copies"
-  | "schedule"
-  | "lastReplicated"
-  | "lastRun"
-  | "run";
-
-const REPLICATION_COLUMNS: readonly ColumnSpec<ReplicationColumn>[] = [
-  { id: "replication", label: "Replication", width: 260, min: 240, locked: true, stripe: true },
-  { id: "state", label: "State", width: 140, min: 130 },
-  { id: "copies", label: "Copies", width: 260, min: 140 },
-  { id: "schedule", label: "Schedule", width: 170, min: 110 },
-  { id: "lastReplicated", label: "Last replicated", width: 160, min: 150 },
-  { id: "lastRun", label: "Last run", width: 160, min: 100 },
-  { id: "run", label: "Run", width: 150, min: 120, locked: true, resizable: false },
-];
-
 export function ReplicationTable({ rows, now = new Date() }: ReplicationTableProps) {
   // One axis for every row's lag bar, scaled to the stalest copy.
   const lag = lagSeries(rows, now);
@@ -78,8 +61,27 @@ export function ReplicationTable({ rows, now = new Date() }: ReplicationTablePro
       rowKey={(row) => row.id}
       rowProps={(row) => ({ "data-kind": KIND_META[replicationKind(row)].slug })}
       cell={(row, id) => replicationCell(row, id, now, lag.max)}
+      sortValue={replicationSortValue}
     />
   );
+}
+
+function replicationSortValue(row: ReplicationRow, id: ReplicationColumn): SortValue {
+  switch (id) {
+    case "replication":
+      return nameValue(row.name, row.namespace);
+    case "state":
+      return healthRank(healthLamp(replicationHealth(row.phase, row.suspended)).key);
+    case "lastReplicated":
+      return timeValue(row.lastReplicated);
+    case "copies":
+    case "schedule":
+    case "lastRun":
+    case "run":
+      return null;
+    default:
+      return id satisfies never;
+  }
 }
 
 function replicationCell(

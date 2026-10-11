@@ -10,7 +10,9 @@ import { admitsText } from "./admits";
 import { KindChip, KindName } from "./KindMark";
 import { KIND_META } from "./kind";
 import { InspectLink } from "./InspectLink";
-import type { ColumnSpec } from "./tableColumns";
+import { type SortValue, nameValue, timeValue } from "./tableColumns";
+import { REPOSITORY_COLUMNS, type RepositoryColumn } from "./listColumns";
+import { healthLamp, healthRank } from "./health";
 
 /**
  * The fleet as a ledger: one row per `Repository` and `ClusterRepository`,
@@ -39,29 +41,6 @@ export interface RepositoryTableProps {
   caption?: string | undefined;
 }
 
-type RepositoryColumn =
-  | "repository"
-  | "health"
-  | "phase"
-  | "access"
-  | "backend"
-  | "snapshots"
-  | "size"
-  | "indexBlobs"
-  | "lastObserved";
-
-const REPOSITORY_COLUMNS: readonly ColumnSpec<RepositoryColumn>[] = [
-  { id: "repository", label: "Repository", width: 240, min: 240, locked: true, stripe: true },
-  { id: "health", label: "Health", width: 130, min: 130 },
-  { id: "phase", label: "Phase", width: 120, min: 80 },
-  { id: "access", label: "Access", width: 180, min: 150 },
-  { id: "backend", label: "Backend", width: 110, min: 90 },
-  { id: "snapshots", label: "Snapshots", width: 110, min: 110, numeric: true },
-  { id: "size", label: "Size", width: 100, min: 96, numeric: true },
-  { id: "indexBlobs", label: "Index blobs", width: 120, min: 120, numeric: true },
-  { id: "lastObserved", label: "Last observed", width: 150, min: 130 },
-];
-
 export function RepositoryTable({ repositories, caption = "Repositories" }: RepositoryTableProps) {
   return (
     <ColumnLedger
@@ -73,8 +52,36 @@ export function RepositoryTable({ repositories, caption = "Repositories" }: Repo
       rowKey={(r) => `${r.kindPath}/${r.namespace ?? ""}/${r.name}`}
       rowProps={(r) => ({ "data-kind": KIND_META[repoKind(r)].slug })}
       cell={repositoryCell}
+      sortValue={repositorySortValue}
     />
   );
+}
+
+function repositorySortValue(repository: RepositorySummary, id: RepositoryColumn): SortValue {
+  switch (id) {
+    case "repository":
+      return nameValue(repository.name, repository.namespace);
+    case "health":
+      return healthRank(healthLamp(repository.health).key);
+    case "phase":
+      return repository.phase === null || repository.phase === undefined
+        ? null
+        : repositoryPhaseLabel(repository.phase);
+    case "backend":
+      return repository.backend ?? null;
+    case "snapshots":
+      return repository.snapshotCount ?? null;
+    case "size":
+      return repository.totalSizeBytes ?? null;
+    case "indexBlobs":
+      return repository.indexBlobCount ?? null;
+    case "lastObserved":
+      return timeValue(repository.lastObservedAt);
+    case "access":
+      return null;
+    default:
+      return id satisfies never;
+  }
 }
 
 function repositoryCell(repository: RepositorySummary, id: RepositoryColumn): ReactNode {

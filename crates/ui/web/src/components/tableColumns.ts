@@ -44,6 +44,107 @@ export interface ColumnSpec<Id extends string = string> {
   stripe?: boolean;
   /** Extra classes on this column's cells. */
   className?: string;
+  /**
+   * Sortable, and how its values compare. Set only where an order means
+   * something — never on a list of references, prose, a cron line or a button.
+   */
+  sort?: SortKind;
+}
+
+/**
+ * How a column's values compare, and so which way its first click runs:
+ * names A to Z, numbers largest first, times newest first, states worst
+ * first (their index in `HEALTH_ORDER`, so ascending is worst first).
+ */
+export type SortKind = "text" | "number" | "time" | "state";
+
+/** The column a table is ordered by, and which way. */
+export interface TableSort {
+  id: string;
+  descending: boolean;
+}
+
+/** One row's value in a sortable column; `null` when it has none. */
+export type SortValue = string | number | null;
+
+/** `?sort=` read against this table: a sortable column of it, or nothing. */
+export function parseSort(raw: unknown, specs: readonly ColumnSpec[]): TableSort | null {
+  if (typeof raw !== "string") return null;
+  const descending = raw.startsWith("-");
+  const id = descending ? raw.slice(1) : raw;
+  const spec = specs.find((s) => s.id === id);
+  return spec?.sort !== undefined ? { id, descending } : null;
+}
+
+/** An object column's value: its name, then its namespace for a tie. */
+export function nameValue(name: string, namespace?: string | null): string {
+  return namespace === null || namespace === undefined ? name : `${name} ${namespace}`;
+}
+
+/** An RFC 3339 instant as a time column's value: `null` when absent or unreadable. */
+export function timeValue(at: string | null | undefined): number | null {
+  if (at === null || at === undefined) return null;
+  const ms = Date.parse(at);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** A sort as `?sort=`: the column id, `-` in front for descending. */
+export function sortParam(sort: TableSort | null): string | undefined {
+  if (sort === null) return undefined;
+  return sort.descending ? `-${sort.id}` : sort.id;
+}
+
+/** Whether a column's first click sorts it descending. */
+export function startsDescending(kind: SortKind): boolean {
+  switch (kind) {
+    case "number":
+    case "time":
+      return true;
+    case "text":
+    case "state":
+      return false;
+    default:
+      return kind satisfies never;
+  }
+}
+
+/**
+ * What a click on `spec`'s header does: a new column starts the way its kind
+ * reads, the same column reverses, and a click on the reversed one lets go —
+ * back to the order the server sent.
+ */
+export function nextSort(current: TableSort | null, spec: ColumnSpec): TableSort | null {
+  if (spec.sort === undefined) return current;
+  const first = startsDescending(spec.sort);
+  if (current?.id !== spec.id) return { id: spec.id, descending: first };
+  return current.descending === first ? { id: spec.id, descending: !first } : null;
+}
+
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+/**
+ * `rows` ordered by `sort`, stably: ties keep the server's order, and a row
+ * with no value sits last whichever way the column runs. Text compares
+ * naturally (`photos-2` before `photos-10`), ignoring case.
+ */
+export function sortRows<R>(
+  rows: readonly R[],
+  sort: TableSort | null,
+  value: (row: R, id: string) => SortValue,
+): R[] {
+  if (sort === null) return [...rows];
+  const sign = sort.descending ? -1 : 1;
+  return rows
+    .map((row) => ({ row, v: value(row, sort.id) }))
+    .sort((a, b) => {
+      if (a.v === null || b.v === null) return a.v === b.v ? 0 : a.v === null ? 1 : -1;
+      const order =
+        typeof a.v === "number" && typeof b.v === "number"
+          ? a.v - b.v
+          : collator.compare(String(a.v), String(b.v));
+      return sign * order;
+    })
+    .map(({ row }) => row);
 }
 
 /** What one person changed about one table. */

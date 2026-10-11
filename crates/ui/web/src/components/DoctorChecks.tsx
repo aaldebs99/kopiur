@@ -8,7 +8,9 @@ import { ColumnLedger } from "./ColumnLedger";
 import { Finding } from "./Finding";
 import { HealthBadge } from "./HealthBadge";
 import { doctorOutcomeLamp, isRbacDegraded } from "./doctor";
-import type { ColumnSpec } from "./tableColumns";
+import type { SortValue } from "./tableColumns";
+import { DOCTOR_COLUMNS, type DoctorColumn } from "./listColumns";
+import { healthRank } from "./health";
 
 /**
  * The doctor report as a ledger: one row per check, the outcome as a lamp,
@@ -80,19 +82,6 @@ function scopeCell(scope: DoctorScopeView, namespace: string | undefined) {
   }
 }
 
-type DoctorColumn = "outcome" | "check" | "scope" | "finding";
-
-/**
- * The outcome and the check name the row, so neither can be hidden or moved;
- * the finding is the prose column and takes the room that is left.
- */
-const DOCTOR_COLUMNS: readonly ColumnSpec<DoctorColumn>[] = [
-  { id: "outcome", label: "Outcome", width: 130, min: 130, locked: true },
-  { id: "check", label: "Check", width: 240, min: 140, locked: true },
-  { id: "scope", label: "Scope", width: 200, min: 160, className: "doctor-checks__scope" },
-  { id: "finding", label: "Finding", width: 400, min: 260 },
-];
-
 export function DoctorChecks({ checks, namespace }: DoctorChecksProps) {
   return (
     <ColumnLedger
@@ -104,8 +93,25 @@ export function DoctorChecks({ checks, namespace }: DoctorChecksProps) {
       rowKey={(check) => check.check}
       rowProps={(check) => ({ "data-degraded": isRbacDegraded(check) ? "rbac" : undefined })}
       cell={(check, id) => doctorCell(check, id, namespace)}
+      sortValue={doctorSortValue}
     />
   );
+}
+
+function doctorSortValue(check: DoctorCheckView, id: DoctorColumn): SortValue {
+  switch (id) {
+    case "outcome":
+      return healthRank(doctorOutcomeLamp(check.outcome).key);
+    case "check":
+      return check.title;
+    case "scope":
+      // Grouped by what the check covers: the cluster, a namespace, or both.
+      return check.scope;
+    case "finding":
+      return null;
+    default:
+      return id satisfies never;
+  }
 }
 
 function doctorCell(

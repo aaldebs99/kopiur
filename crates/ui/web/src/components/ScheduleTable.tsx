@@ -4,12 +4,13 @@ import type { ScheduleRow } from "../api/types";
 import { relativeTime } from "../util/format";
 import { ColumnLedger } from "./ColumnLedger";
 import { LampBadge } from "./HealthBadge";
-import { healthLamp, loudLamp } from "./health";
+import { healthLamp, healthRank, loudLamp } from "./health";
 import { firesBySelector, scheduleCron, scheduleFires } from "./schedule";
 import { KindChip } from "./KindMark";
 import { ObjectRef } from "./ObjectRef";
 import { InspectLink } from "./InspectLink";
-import type { ColumnSpec } from "./tableColumns";
+import { type SortValue, nameValue, timeValue } from "./tableColumns";
+import { SCHEDULE_COLUMNS, SCHEDULE_COLUMNS_WITH_ACTION, type ScheduleColumn } from "./listColumns";
 
 /**
  * Every `SnapshotSchedule` in scope: the cron, what it fires, when it last
@@ -30,31 +31,6 @@ export interface ScheduleTableProps {
   now?: Date | undefined;
 }
 
-type ScheduleColumn = "schedule" | "cron" | "fires" | "state" | "lastFire" | "nextFire" | "action";
-
-const SCHEDULE_COLUMNS: readonly ColumnSpec<ScheduleColumn>[] = [
-  { id: "schedule", label: "Schedule", width: 240, min: 220, locked: true, stripe: true },
-  { id: "cron", label: "Cron", width: 200, min: 200, className: "mono schedule-table__cron" },
-  { id: "fires", label: "Fires", width: 220, min: 160 },
-  { id: "state", label: "State", width: 150, min: 140 },
-  { id: "lastFire", label: "Last fire", width: 150, min: 150, numeric: true },
-  { id: "nextFire", label: "Next fire", width: 170, min: 170, numeric: true },
-];
-
-/** With the route's suspend control: a column of buttons, kept last. */
-const SCHEDULE_COLUMNS_WITH_ACTION: readonly ColumnSpec<ScheduleColumn>[] = [
-  ...SCHEDULE_COLUMNS,
-  {
-    id: "action",
-    label: "Action",
-    width: 150,
-    min: 150,
-    locked: true,
-    resizable: false,
-    className: "schedule-table__action",
-  },
-];
-
 export function ScheduleTable({ schedules, renderAction, now = new Date() }: ScheduleTableProps) {
   return (
     <ColumnLedger
@@ -66,8 +42,31 @@ export function ScheduleTable({ schedules, renderAction, now = new Date() }: Sch
       rowKey={(s) => `${s.namespace}/${s.name}`}
       rowProps={() => ({ "data-kind": "snapshot-schedule" })}
       cell={(schedule, id) => scheduleCell(schedule, id, now, renderAction)}
+      sortValue={scheduleSortValue}
     />
   );
+}
+
+function scheduleSortValue(schedule: ScheduleRow, id: ScheduleColumn): SortValue {
+  switch (id) {
+    case "schedule":
+      return nameValue(schedule.name, schedule.namespace);
+    case "state":
+      // The State cell's own reading: suspended, failing, or active.
+      return healthRank(
+        schedule.suspended ? "suspended" : schedule.consecutiveFailures > 0 ? "failed" : "healthy",
+      );
+    case "lastFire":
+      return timeValue(schedule.lastFire);
+    case "nextFire":
+      return timeValue(schedule.nextFire);
+    case "cron":
+    case "fires":
+    case "action":
+      return null;
+    default:
+      return id satisfies never;
+  }
 }
 
 function scheduleCell(

@@ -1,9 +1,16 @@
-import { render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { DoctorCheckView } from "../api/types";
-import { bodyRows, nth } from "../test-utils";
+import { bodyRows, nth, renderWithRouter } from "../test-utils";
 import { DoctorChecks } from "./DoctorChecks";
+
+/** The table sorts through the address bar, so it renders inside a router. */
+async function render(element: ReactElement) {
+  renderWithRouter(element);
+  await screen.findByRole("table");
+}
 
 const checks: DoctorCheckView[] = [
   {
@@ -52,9 +59,9 @@ const checks: DoctorCheckView[] = [
 ];
 
 describe("DoctorChecks", () => {
-  it("renders one row per check with its outcome lamp, and only a failure carries what/why/fix", () => {
+  it("renders one row per check with its outcome lamp, and only a failure carries what/why/fix", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    render(<DoctorChecks checks={checks} namespace={undefined} />);
+    await render(<DoctorChecks checks={checks} namespace={undefined} />);
     const table = screen.getByRole("table", { name: "Doctor checks" });
     const rows = bodyRows(table);
     expect(rows).toHaveLength(5);
@@ -81,14 +88,14 @@ describe("DoctorChecks", () => {
     warn.mockRestore();
   });
 
-  it("says what the server says each check read, including the two that are both", () => {
+  it("says what the server says each check read, including the two that are both", async () => {
     // The scope is `DoctorCheckView.scope`, not a table kept here. The client
     // used to own that table and it was already wrong: `list_repos` lists
     // `Repository` inside the namespace and `ClusterRepository` cluster-wide,
     // so the repository checks were never purely namespace-scoped and
     // "scoped to media" over them was an overstatement.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    render(<DoctorChecks checks={checks} namespace="media" />);
+    await render(<DoctorChecks checks={checks} namespace="media" />);
     const rows = bodyRows(screen.getByRole("table"));
     // Namespace-scoped: narrowed, and only narrowed.
     expect(nth(rows, 2)).toHaveTextContent("scoped to media");
@@ -105,9 +112,9 @@ describe("DoctorChecks", () => {
     warn.mockRestore();
   });
 
-  it("does not claim a namespace narrowed anything when the run had none", () => {
+  it("does not claim a namespace narrowed anything when the run had none", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    render(<DoctorChecks checks={checks} namespace={undefined} />);
+    await render(<DoctorChecks checks={checks} namespace={undefined} />);
     const rows = bodyRows(screen.getByRole("table"));
     expect(nth(rows, 2)).toHaveTextContent(/every namespace/i);
     expect(nth(rows, 1)).toHaveTextContent(/every namespace/i);
@@ -117,9 +124,9 @@ describe("DoctorChecks", () => {
     warn.mockRestore();
   });
 
-  it("explains an RBAC-degraded check as a missing grant for the signed-in user", () => {
+  it("explains an RBAC-degraded check as a missing grant for the signed-in user", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    render(<DoctorChecks checks={checks} namespace={undefined} />);
+    await render(<DoctorChecks checks={checks} namespace={undefined} />);
     const rows = bodyRows(screen.getByRole("table"));
     const degraded = nth(rows, 1);
     expect(degraded).toHaveAttribute("data-degraded", "rbac");

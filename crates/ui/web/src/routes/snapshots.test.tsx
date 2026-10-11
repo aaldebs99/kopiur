@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -296,6 +296,39 @@ describe("Snapshots list", () => {
     // the default is the absence, and the two must not both exist as URLs.
     const previous = screen.getByRole("link", { name: "Previous" });
     expect(previous).toHaveAttribute("href", "/snapshots?limit=20");
+  });
+
+  it("asks the server for the order a header was sorted by, from the top", async () => {
+    mockApi({
+      "/api/v1/snapshots": jsonResponse(page([row()], { total: 137, offset: 50, limit: 50 })),
+    });
+    const { router } = mountApp("/snapshots?offset=50");
+    const table = await list();
+    expect(snapshotRequest()).not.toContain("sort=");
+    await userEvent.setup().click(within(table).getByRole("button", { name: "Sort by Size" }));
+    await waitFor(() => {
+      expect(snapshotRequest()).toContain("sort=-size");
+    });
+    // A new order starts at its top, not on page two of the old one.
+    expect(snapshotRequest()).not.toContain("offset=");
+    expect(router.state.location.search).toEqual({ sort: "-size" });
+  });
+
+  it("keeps the order on every page, and never sends a sort the server does not know", async () => {
+    mockApi({
+      "/api/v1/snapshots": jsonResponse(page([row()], { total: 137, offset: 0, limit: 50 })),
+    });
+    mountApp("/snapshots?sort=-size");
+    await list();
+    expect(snapshotRequest()).toContain("sort=-size");
+    expect(screen.getByRole("link", { name: "Next" })).toHaveAttribute(
+      "href",
+      expect.stringContaining("sort=-size"),
+    );
+    cleanup();
+    mountApp("/snapshots?sort=identity");
+    await list();
+    expect(snapshotRequest()).not.toContain("sort=");
   });
 
   it("degrades to an empty state when the body is not a page at all", async () => {

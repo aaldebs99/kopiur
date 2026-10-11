@@ -4,7 +4,9 @@ import type { GateDescriptor } from "../api/types";
 import { ColumnLedger } from "./ColumnLedger";
 import { HealthBadge } from "./HealthBadge";
 import { gateScopeKinds, gateSeverityLamp, sortGates } from "./gates";
-import type { ColumnSpec } from "./tableColumns";
+import type { SortValue } from "./tableColumns";
+import { GATE_COLUMNS, type GateColumn } from "./listColumns";
+import { healthRank } from "./health";
 
 /**
  * The structural-gate registry as a ledger: severity lamp, the condition
@@ -19,23 +21,6 @@ export interface GateListProps {
   gates: readonly GateDescriptor[];
 }
 
-type GateColumn = "severity" | "condition" | "blockedWhen" | "reason" | "appliesTo";
-
-/** Severity and condition name the gate, so they stay; the reason takes what is left. */
-const GATE_COLUMNS: readonly ColumnSpec<GateColumn>[] = [
-  { id: "severity", label: "Severity", width: 130, min: 130, locked: true },
-  { id: "condition", label: "Condition", width: 240, min: 120, locked: true, className: "mono" },
-  {
-    id: "blockedWhen",
-    label: "Blocked when",
-    width: 160,
-    min: 130,
-    className: "mono gate-list__status",
-  },
-  { id: "reason", label: "Reason", width: 300, min: 180, className: "mono" },
-  { id: "appliesTo", label: "Applies to", width: 260, min: 150 },
-];
-
 export function GateList({ gates }: GateListProps) {
   return (
     <ColumnLedger
@@ -46,8 +31,25 @@ export function GateList({ gates }: GateListProps) {
       rows={sortGates(gates)}
       rowKey={(gate) => `${gate.condition}/${gate.reason}`}
       cell={gateCell}
+      sortValue={gateSortValue}
     />
   );
+}
+
+function gateSortValue(gate: GateDescriptor, id: GateColumn): SortValue {
+  switch (id) {
+    case "severity":
+      return healthRank(gateSeverityLamp(gate.severity).key);
+    case "condition":
+      return gate.condition;
+    case "reason":
+      return gate.reason;
+    case "blockedWhen":
+    case "appliesTo":
+      return null;
+    default:
+      return id satisfies never;
+  }
 }
 
 function gateCell(gate: GateDescriptor, id: GateColumn): ReactNode {

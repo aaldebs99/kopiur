@@ -14,16 +14,24 @@ import { namespaceFromSearch } from "../util/namespace";
 export interface RootSearch {
   namespace?: string;
   inspect?: string;
+  /** The page's table order: a column id, `-` in front for descending. */
+  sort?: string;
 }
+
+/** A `?sort=` worth keeping; whether its column exists is the table's to say. */
+const SORT_PARAM = /^-?[A-Za-z]+$/;
 
 export const Route = createRootRoute({
   validateSearch: (search: Record<string, unknown>): RootSearch => {
     const namespace = namespaceFromSearch(search);
     const stack = parseInspectStack(search.inspect);
     const inspect = stack.length > 0 ? inspectStackParam(stack) : undefined;
+    const sort =
+      typeof search.sort === "string" && SORT_PARAM.test(search.sort) ? search.sort : undefined;
     return {
       ...(namespace === undefined ? {} : { namespace }),
       ...(inspect === undefined ? {} : { inspect }),
+      ...(sort === undefined ? {} : { sort }),
     };
   },
   component: RootLayout,

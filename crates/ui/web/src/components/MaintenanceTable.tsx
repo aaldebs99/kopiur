@@ -9,7 +9,12 @@ import { NotReported } from "./NotReported";
 import { KindChip } from "./KindMark";
 import { WireRef } from "./ObjectRef";
 import { InspectLink } from "./InspectLink";
-import type { ColumnSpec } from "./tableColumns";
+import { type SortValue, nameValue, timeValue } from "./tableColumns";
+import {
+  MAINTENANCE_COLUMNS,
+  MAINTENANCE_COLUMNS_WITH_ACTION,
+  type MaintenanceColumn,
+} from "./listColumns";
 
 /**
  * Every `Maintenance` in scope as a ledger: one row per object, its two run
@@ -43,38 +48,6 @@ export interface MaintenanceTableProps {
   now?: Date | undefined;
 }
 
-type MaintenanceColumn =
-  | "maintenance"
-  | "repository"
-  | "quickLast"
-  | "quickNext"
-  | "quickFailures"
-  | "fullLast"
-  | "fullNext"
-  | "fullFailures"
-  | "reclaimed"
-  | "manual"
-  | "action";
-
-const MAINTENANCE_COLUMNS: readonly ColumnSpec<MaintenanceColumn>[] = [
-  { id: "maintenance", label: "Maintenance", width: 240, min: 220, locked: true, stripe: true },
-  { id: "repository", label: "Repository", width: 220, min: 210 },
-  { id: "quickLast", label: "Quick last run", width: 140, min: 140 },
-  { id: "quickNext", label: "Quick next run", width: 140, min: 140, defaultHidden: true },
-  { id: "quickFailures", label: "Quick failures", width: 130, min: 130 },
-  { id: "fullLast", label: "Full last run", width: 130, min: 130 },
-  { id: "fullNext", label: "Full next run", width: 140, min: 130, defaultHidden: true },
-  { id: "fullFailures", label: "Full failures", width: 120, min: 120 },
-  { id: "reclaimed", label: "Reclaimed", width: 110, min: 100, numeric: true },
-  { id: "manual", label: "Manual run", width: 200, min: 120 },
-];
-
-/** With the route's run control: a column of buttons, kept last. */
-const MAINTENANCE_COLUMNS_WITH_ACTION: readonly ColumnSpec<MaintenanceColumn>[] = [
-  ...MAINTENANCE_COLUMNS,
-  { id: "action", label: "Run", width: 110, min: 110, locked: true, resizable: false },
-];
-
 export function MaintenanceTable({ rows, renderAction, now = new Date() }: MaintenanceTableProps) {
   return (
     <ColumnLedger
@@ -86,8 +59,38 @@ export function MaintenanceTable({ rows, renderAction, now = new Date() }: Maint
       rowKey={(row) => `${row.namespace}/${row.name}`}
       rowProps={() => ({ "data-kind": "maintenance" })}
       cell={(row, id) => maintenanceCell(row, id, now, renderAction)}
+      sortValue={maintenanceSortValue}
     />
   );
+}
+
+function maintenanceSortValue(row: MaintenanceRow, id: MaintenanceColumn): SortValue {
+  switch (id) {
+    case "maintenance":
+      return nameValue(row.name, row.namespace);
+    case "repository":
+      return row.repository;
+    case "quickLast":
+      return timeValue(row.quick.lastRunAt);
+    case "quickNext":
+      return timeValue(row.quick.nextScheduledAt);
+    case "quickFailures":
+      return row.quick.consecutiveFailures;
+    case "fullLast":
+      return timeValue(row.full.lastRunAt);
+    case "fullNext":
+      return timeValue(row.full.nextScheduledAt);
+    case "fullFailures":
+      return row.full.consecutiveFailures;
+    case "reclaimed":
+      // The same figure the cell shows: the full track's, else the quick one's.
+      return row.full.lastContentReclaimedBytes ?? row.quick.lastContentReclaimedBytes ?? null;
+    case "manual":
+    case "action":
+      return null;
+    default:
+      return id satisfies never;
+  }
 }
 
 function maintenanceCell(

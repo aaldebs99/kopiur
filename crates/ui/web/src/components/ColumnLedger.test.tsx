@@ -1,3 +1,9 @@
+import {
+  RouterProvider,
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+} from "@tanstack/react-router";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -27,6 +33,20 @@ const ROWS: Row[] = [
   { name: "photos-2", phase: "Failed", size: "—" },
 ];
 
+/** Sizes as numbers, the empty cell as none. */
+function sortValue(row: Row, id: Id) {
+  switch (id) {
+    case "name":
+      return row.name;
+    case "phase":
+      return row.phase;
+    case "size":
+      return row.size === "—" ? null : Number.parseFloat(row.size);
+    case "run":
+      return null;
+  }
+}
+
 function cell(row: Row, id: Id) {
   switch (id) {
     case "name":
@@ -40,8 +60,14 @@ function cell(row: Row, id: Id) {
   }
 }
 
-function mount(columns: readonly ColumnSpec<Id>[] = COLUMNS) {
-  render(
+interface MountOptions {
+  columns?: readonly ColumnSpec<Id>[];
+  path?: string;
+  serverSorted?: boolean;
+}
+
+async function mount(columns: readonly ColumnSpec<Id>[] = COLUMNS, options: MountOptions = {}) {
+  const ledger = (
     <ColumnLedger
       id="test"
       label="Test table"
@@ -51,9 +77,18 @@ function mount(columns: readonly ColumnSpec<Id>[] = COLUMNS) {
       rowKey={(r) => r.name}
       rowProps={() => ({ "data-kind": "snapshot" })}
       cell={cell}
-    />,
+      sortValue={sortValue}
+      serverSorted={options.serverSorted}
+    />
   );
-  return screen.getByRole("table", { name: "Test table" });
+  const root = createRootRoute({ component: () => ledger });
+  const router = createRouter({
+    routeTree: root,
+    history: createMemoryHistory({ initialEntries: [options.path ?? "/"] }),
+  });
+  render(<RouterProvider router={router} />);
+  const table = await screen.findByRole("table", { name: "Test table" });
+  return Object.assign(table, { router });
 }
 
 const stored = () => JSON.parse(window.localStorage.getItem(COLUMNS_KEY) ?? "{}") as unknown;
@@ -68,8 +103,8 @@ beforeEach(() => {
 });
 
 describe("ColumnLedger", () => {
-  it("draws the declared columns in order, the first with the kind stripe", () => {
-    const table = mount();
+  it("draws the declared columns in order, the first with the kind stripe", async () => {
+    const table = await mount();
     expect(table).toHaveClass("ledger", "ledger--fixed", "test-table");
     expect(headers(table)).toEqual(["Snapshot", "Phase", "Size", "Run"]);
     const row = nth(bodyRows(table), 0);
@@ -80,14 +115,14 @@ describe("ColumnLedger", () => {
     expect(nth(cells, 2)).toHaveClass("num");
   });
 
-  it("offers its own Columns menu, above the card", () => {
-    const table = mount();
+  it("offers its own Columns menu, above the card", async () => {
+    const table = await mount();
     const menu = screen.getByRole("button", { name: "Columns" });
     expect(menu.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("sizes every column through a colgroup but the last, which takes the room left", () => {
-    const table = mount();
+  it("sizes every column through a colgroup but the last, which takes the room left", async () => {
+    const table = await mount();
     const cols = Array.from(table.querySelectorAll<HTMLElement>("colgroup col"));
     expect(cols.map((c) => c.style.width)).toEqual(["260px", "130px", "100px", ""]);
     // Every column at its width, the last at its floor: 260 + 130 + 100 + 90.
@@ -95,14 +130,14 @@ describe("ColumnLedger", () => {
     expect(table.style.width).toBe("100%");
   });
 
-  it("has no handle on the last column, whose right edge is the table's", () => {
-    mount(COLUMNS.slice(0, 3));
+  it("has no handle on the last column, whose right edge is the table's", async () => {
+    await mount(COLUMNS.slice(0, 3));
     expect(screen.getByRole("separator", { name: "Resize Phase" })).toBeInTheDocument();
     expect(screen.queryByRole("separator", { name: "Resize Size" })).toBeNull();
   });
 
   it("changes only the column being resized", async () => {
-    const table = mount();
+    const table = await mount();
     const widths = () =>
       Array.from(table.querySelectorAll<HTMLElement>("colgroup col")).map((c) => c.style.width);
     const user = userEvent.setup();
@@ -114,8 +149,8 @@ describe("ColumnLedger", () => {
     expect(widths()).toEqual(["244px", "178px", "100px", ""]);
   });
 
-  it("drops a hidden column from the header and every row together", () => {
-    const table = mount();
+  it("drops a hidden column from the header and every row together", async () => {
+    const table = await mount();
     act(() => {
       setHidden("test", "phase", true);
     });
@@ -126,8 +161,8 @@ describe("ColumnLedger", () => {
     expect(table.querySelectorAll("colgroup col")).toHaveLength(3);
   });
 
-  it("gives each resizable column a handle named for it, in pixels", () => {
-    mount();
+  it("gives each resizable column a handle named for it, in pixels", async () => {
+    await mount();
     const handle = screen.getByRole("separator", { name: "Resize Phase" });
     expect(handle).toHaveAttribute("aria-orientation", "vertical");
     expect(handle).toHaveAttribute("aria-valuenow", "130");
@@ -137,7 +172,7 @@ describe("ColumnLedger", () => {
   });
 
   it("resizes with the arrow keys and remembers it", async () => {
-    const table = mount();
+    const table = await mount();
     const handle = screen.getByRole("separator", { name: "Resize Phase" });
     const user = userEvent.setup();
     handle.focus();
@@ -153,7 +188,7 @@ describe("ColumnLedger", () => {
   });
 
   it("goes back to its declared width on Home or a double click", async () => {
-    mount();
+    await mount();
     const handle = screen.getByRole("separator", { name: "Resize Size" });
     const user = userEvent.setup();
     handle.focus();
@@ -167,8 +202,8 @@ describe("ColumnLedger", () => {
     expect(stored()).toEqual({});
   });
 
-  it("follows a drag from where it started, and stores it once the drag ends", () => {
-    mount();
+  it("follows a drag from where it started, and stores it once the drag ends", async () => {
+    await mount();
     const handle = screen.getByRole("separator", { name: "Resize Phase" });
     handle.setPointerCapture = () => undefined;
     handle.releasePointerCapture = () => undefined;
@@ -181,13 +216,79 @@ describe("ColumnLedger", () => {
     expect(stored()).toEqual({ test: { width: { phase: 190 } } });
   });
 
-  it("opens with the widths it was left at", () => {
+  it("opens with the widths it was left at", async () => {
     window.localStorage.setItem(COLUMNS_KEY, JSON.stringify({ test: { width: { size: 150 } } }));
     forgetColumnPrefs();
-    mount();
+    await mount();
     expect(screen.getByRole("separator", { name: "Resize Size" })).toHaveAttribute(
       "aria-valuenow",
       "150",
     );
+  });
+
+  describe("sorting", () => {
+    const SORTED: readonly ColumnSpec<Id>[] = COLUMNS.map((c) =>
+      c.id === "name" ? { ...c, sort: "text" } : c.id === "size" ? { ...c, sort: "number" } : c,
+    );
+    const names = (table: HTMLElement) =>
+      bodyRows(table).map((row) => row.querySelector("td")?.textContent);
+    const search = (table: Awaited<ReturnType<typeof mount>>) =>
+      table.router.state.location.search as Record<string, unknown>;
+
+    it("offers a sort only on the columns that declare one", async () => {
+      const table = await mount(SORTED);
+      const sortable = within(table)
+        .getAllByRole("columnheader")
+        .filter((th) => th.hasAttribute("aria-sort"))
+        .map((th) => th.querySelector(".ledger__label")?.textContent);
+      expect(sortable).toEqual(["Snapshot", "Size"]);
+      expect(within(table).getAllByRole("button", { name: /^Sort by/ })).toHaveLength(2);
+      expect(within(table).queryByRole("button", { name: "Sort by Phase" })).toBeNull();
+    });
+
+    it("sorts on a click, reverses on the next, and lets go on the third", async () => {
+      const table = await mount(SORTED, { path: "/?offset=50" });
+      const user = userEvent.setup();
+      const size = within(table).getByRole("button", { name: "Sort by Size" });
+      await user.click(size);
+      expect(search(table).sort).toBe("-size");
+      expect(search(table).offset).toBeUndefined();
+      expect(size.closest("th")).toHaveAttribute("aria-sort", "descending");
+      expect(names(table)).toEqual(["photos-1", "photos-2"]);
+      await user.click(size);
+      expect(search(table).sort).toBe("size");
+      expect(size.closest("th")).toHaveAttribute("aria-sort", "ascending");
+      // The empty size stays last whichever way the column runs.
+      expect(names(table)).toEqual(["photos-1", "photos-2"]);
+      await user.click(size);
+      expect(search(table).sort).toBeUndefined();
+      expect(size.closest("th")).toHaveAttribute("aria-sort", "none");
+    });
+
+    it("opens sorted from the address", async () => {
+      const table = await mount(SORTED, { path: "/?sort=-name" });
+      expect(names(table)).toEqual(["photos-2", "photos-1"]);
+      expect(
+        within(table).getByRole("button", { name: "Sort by Snapshot" }).closest("th"),
+      ).toHaveAttribute("aria-sort", "descending");
+    });
+
+    it("leaves the rows alone when the server did the sorting", async () => {
+      const table = await mount(SORTED, { path: "/?sort=-name", serverSorted: true });
+      expect(names(table)).toEqual(["photos-1", "photos-2"]);
+      expect(
+        within(table).getByRole("button", { name: "Sort by Snapshot" }).closest("th"),
+      ).toHaveAttribute("aria-sort", "descending");
+    });
+
+    it("never sorts when a column is resized", async () => {
+      const table = await mount(SORTED);
+      const handle = screen.getByRole("separator", { name: "Resize Size" });
+      fireEvent.pointerDown(handle, { button: 0, clientX: 100, pointerId: 1 });
+      fireEvent.pointerMove(handle, { clientX: 140, pointerId: 1 });
+      fireEvent.pointerUp(handle, { clientX: 140, pointerId: 1 });
+      fireEvent.click(handle);
+      expect(search(table).sort).toBeUndefined();
+    });
   });
 });

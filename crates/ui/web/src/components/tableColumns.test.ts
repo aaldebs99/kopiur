@@ -10,8 +10,12 @@ import {
   isVisible,
   movableOrder,
   moveColumn,
+  nextSort,
   orderedColumns,
   parsePrefs,
+  parseSort,
+  sortParam,
+  sortRows,
   tableMinWidth,
   visibleColumns,
 } from "./tableColumns";
@@ -209,5 +213,78 @@ describe("fitting the columns to the card", () => {
     // Origin was dragged; every other column is drawn exactly as before.
     expect(fitWidths(visible, { width: { origin: 300 } }, 615)).toEqual([230, 110, 300, 85, 90]);
     expect(fitWidths(visible, { width: { origin: 90 } }, 615)).toEqual([230, 110, 90, 85, 90]);
+  });
+});
+
+describe("sorting", () => {
+  const SORTABLE: ColumnSpec[] = [
+    { id: "name", label: "Name", width: 200, min: 100, sort: "text" },
+    { id: "size", label: "Size", width: 100, min: 70, sort: "number" },
+    { id: "started", label: "Started", width: 100, min: 70, sort: "time" },
+    { id: "health", label: "Health", width: 100, min: 70, sort: "state" },
+    { id: "cron", label: "Cron", width: 100, min: 70 },
+  ];
+  const spec = (id: string): ColumnSpec => {
+    const found = SORTABLE.find((s) => s.id === id);
+    if (found === undefined) throw new Error(`no column ${id}`);
+    return found;
+  };
+
+  it("reads ?sort= as a sortable column of this table, and nothing else", () => {
+    expect(parseSort("size", SORTABLE)).toEqual({ id: "size", descending: false });
+    expect(parseSort("-size", SORTABLE)).toEqual({ id: "size", descending: true });
+    expect(parseSort("cron", SORTABLE)).toBeNull();
+    expect(parseSort("-nope", SORTABLE)).toBeNull();
+    expect(parseSort(7, SORTABLE)).toBeNull();
+    expect(parseSort(undefined, SORTABLE)).toBeNull();
+  });
+
+  it("writes a sort back as the column id, with a minus for descending", () => {
+    expect(sortParam({ id: "size", descending: true })).toBe("-size");
+    expect(sortParam({ id: "name", descending: false })).toBe("name");
+    expect(sortParam(null)).toBeUndefined();
+  });
+
+  it("starts each kind the way a person reads it, then reverses, then lets go", () => {
+    const first = (id: string) => nextSort(null, spec(id));
+    expect(first("name")).toEqual({ id: "name", descending: false });
+    expect(first("size")).toEqual({ id: "size", descending: true });
+    expect(first("started")).toEqual({ id: "started", descending: true });
+    expect(first("health")).toEqual({ id: "health", descending: false });
+    const second = nextSort(first("size"), spec("size"));
+    expect(second).toEqual({ id: "size", descending: false });
+    expect(nextSort(second, spec("size"))).toBeNull();
+    // Another column starts fresh rather than continuing this one's cycle.
+    expect(nextSort(second, spec("name"))).toEqual({ id: "name", descending: false });
+  });
+
+  it("orders stably, keeps empty values last either way, and reads names naturally", () => {
+    const rows = [
+      { n: "photos-10", v: 3 as number | null },
+      { n: "photos-2", v: null },
+      { n: "photos-1", v: 3 },
+      { n: "Photos-3", v: 1 },
+    ];
+    const value = (r: (typeof rows)[number], id: string) => (id === "name" ? r.n : r.v);
+    const names = (sorted: typeof rows) => sorted.map((r) => r.n);
+    expect(names(sortRows(rows, { id: "name", descending: false }, value))).toEqual([
+      "photos-1",
+      "photos-2",
+      "Photos-3",
+      "photos-10",
+    ]);
+    expect(names(sortRows(rows, { id: "size", descending: true }, value))).toEqual([
+      "photos-10",
+      "photos-1",
+      "Photos-3",
+      "photos-2",
+    ]);
+    expect(names(sortRows(rows, { id: "size", descending: false }, value))).toEqual([
+      "Photos-3",
+      "photos-10",
+      "photos-1",
+      "photos-2",
+    ]);
+    expect(names(sortRows(rows, null, value))).toEqual(names(rows));
   });
 });

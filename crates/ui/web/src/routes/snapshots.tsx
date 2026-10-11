@@ -10,7 +10,9 @@ import { LoadingState } from "../components/LoadingState";
 import { PickerField } from "../components/PickerField";
 import { PolicyField, RepositoryField } from "../components/ResourceFields";
 import { repositoryKey } from "../components/pickerChoices";
+import { SNAPSHOT_COLUMNS } from "../components/listColumns";
 import { SnapshotTable } from "../components/SnapshotTable";
+import { parseSort, sortParam } from "../components/tableColumns";
 import { healthLamp } from "../components/health";
 import {
   ORIGIN_FILTERS,
@@ -174,6 +176,9 @@ function Snapshots() {
     policy: textParam(search.policy),
     origin: textParam(search.origin),
     phase: textParam(search.phase),
+    // Only a key the server sorts by: a stale or mistyped one is dropped
+    // rather than sent for a 400.
+    sort: sortParam(parseSort(search.sort, SNAPSHOT_COLUMNS)),
   };
   const offset = countParam(search.offset) ?? 0;
   const limit = countParam(search.limit) ?? DEFAULT_LIMIT;
@@ -211,6 +216,7 @@ function Snapshots() {
     phase: usable("phase"),
     offset: offset > 0 ? offset : undefined,
     limit,
+    sort: asked.sort,
   };
 
   const snapshots = useSnapshots(params);
@@ -419,6 +425,8 @@ function Filters({ search, namespace, limit }: FiltersProps) {
     if (limit !== DEFAULT_LIMIT) {
       next.limit = limit;
     }
+    // The order a person chose survives a change of filter.
+    if (search.sort !== undefined) next.sort = search.sort;
     void navigate({ to: "/snapshots", search: next });
   };
   const anyChosen = Object.values(current).some((list) => list.length > 0);

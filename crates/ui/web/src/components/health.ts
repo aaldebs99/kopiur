@@ -93,6 +93,11 @@ export const HEALTH_ORDER: readonly HealthKey[] = [
   "healthy",
 ];
 
+/** A lamp's place in {@link HEALTH_ORDER}: how a state column sorts, worst first. */
+export function healthRank(key: HealthKey): number {
+  return HEALTH_ORDER.indexOf(key);
+}
+
 /**
  * Repositories counted per lamp, from the server's own `health` — never from
  * a phase-to-health table in this bundle. A health this bundle has never seen

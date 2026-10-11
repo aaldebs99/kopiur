@@ -9,16 +9,19 @@ import { KindChip } from "./KindMark";
 import { ObjectRef, WireRef } from "./ObjectRef";
 import { durationSeconds, originLabel, snapshotPhaseLamp } from "./snapshot";
 import { InspectLink } from "./InspectLink";
-import type { ColumnSpec } from "./tableColumns";
+import { SNAPSHOT_COLUMNS, type SnapshotColumn } from "./listColumns";
 
 /**
  * The snapshots ledger: one row per `Snapshot` resource, newest run first.
  *
- * The order is the **server's** (`filter_rows` sorts by the run's start time
- * with the CR name as the tiebreaker, so two runs that started in the same
- * second do not swap places between polls), and this never re-sorts: a table
- * that reordered client-side would disagree with the `offset`/`limit` window
- * the same request produced, and page 2 would repeat rows from page 1.
+ * The order is the **server's**: by default `filter_rows` sorts by the run's
+ * start time with the CR name as the tiebreaker (so two runs that started in
+ * the same second do not swap places between polls), and a sorted header asks
+ * the server for `?sort=` (`api/snapshot_sort.rs`), which orders before it
+ * pages. This never re-sorts: a table that reordered client-side would
+ * disagree with the `offset`/`limit` window the same request produced, and
+ * page 2 would repeat rows from page 1. The column ids are the server's sort
+ * keys, so the header a person clicks is the key the request carries.
  *
  * Three columns that are not obvious.
  *
@@ -45,35 +48,6 @@ export interface SnapshotTableProps {
   caption?: string | undefined;
 }
 
-type SnapshotColumn =
-  | "snapshot"
-  | "phase"
-  | "origin"
-  | "policy"
-  | "repository"
-  | "size"
-  | "files"
-  | "started"
-  | "took";
-
-const SNAPSHOT_COLUMNS: readonly ColumnSpec<SnapshotColumn>[] = [
-  { id: "snapshot", label: "Snapshot", width: 240, min: 200, locked: true, stripe: true },
-  { id: "phase", label: "Phase", width: 130, min: 130 },
-  { id: "origin", label: "Origin", width: 110, min: 80 },
-  { id: "policy", label: "Policy", width: 210, min: 200 },
-  {
-    id: "repository",
-    label: "Repository",
-    width: 220,
-    min: 210,
-    className: "snapshot-table__repository",
-  },
-  { id: "size", label: "Size", width: 100, min: 96, numeric: true },
-  { id: "files", label: "Files", width: 110, min: 80, numeric: true },
-  { id: "started", label: "Started", width: 100, min: 90, numeric: true },
-  { id: "took", label: "Took", width: 80, min: 70, numeric: true },
-];
-
 export function SnapshotTable({
   rows,
   now = new Date(),
@@ -89,6 +63,7 @@ export function SnapshotTable({
       rowKey={(row) => `${row.namespace}/${row.name}`}
       rowProps={() => ({ "data-kind": "snapshot" })}
       cell={(row, id) => snapshotCell(row, id, now)}
+      serverSorted
     />
   );
 }

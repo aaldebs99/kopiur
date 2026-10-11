@@ -1,9 +1,16 @@
-import { render, screen, within } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { GateDescriptor, GateSeverityView } from "../api/types";
-import { bodyRows, nth } from "../test-utils";
+import { bodyRows, nth, renderWithRouter } from "../test-utils";
 import { GateList } from "./GateList";
+
+/** The table sorts through the address bar, so it renders inside a router. */
+async function render(element: ReactElement) {
+  renderWithRouter(element);
+  await screen.findByRole("table");
+}
 
 const registry: GateDescriptor[] = [
   {
@@ -30,8 +37,8 @@ const registry: GateDescriptor[] = [
 ];
 
 describe("GateList", () => {
-  it("renders the registry errors first, one row per gate, with severity as a lettered lamp", () => {
-    render(<GateList gates={registry} />);
+  it("renders the registry errors first, one row per gate, with severity as a lettered lamp", async () => {
+    await render(<GateList gates={registry} />);
     const table = screen.getByRole("table", { name: "Structural gates" });
     const rows = bodyRows(table);
     expect(rows).toHaveLength(3);
@@ -62,9 +69,9 @@ describe("GateList", () => {
     expect(writable.querySelector(".health")).toHaveTextContent("Warning");
   });
 
-  it("keeps a gate whose severity this bundle cannot read, lamped unknown with the raw word", () => {
+  it("keeps a gate whose severity this bundle cannot read, lamped unknown with the raw word", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    render(
+    await render(
       <GateList
         gates={[
           {

@@ -8,7 +8,9 @@ import { restorePhaseLamp, restoreProgress } from "./restore";
 import { KindChip } from "./KindMark";
 import { WireRef } from "./ObjectRef";
 import { InspectLink } from "./InspectLink";
-import type { ColumnSpec } from "./tableColumns";
+import { type SortValue, nameValue, timeValue } from "./tableColumns";
+import { RESTORE_COLUMNS, type RestoreColumn } from "./listColumns";
+import { healthRank } from "./health";
 
 /**
  * Every `Restore` in scope: where it reads, where it writes, how far it got.
@@ -27,17 +29,6 @@ export interface RestoreTableProps {
   now?: Date | undefined;
 }
 
-type RestoreColumn = "restore" | "phase" | "route" | "repository" | "restored" | "started";
-
-const RESTORE_COLUMNS: readonly ColumnSpec<RestoreColumn>[] = [
-  { id: "restore", label: "Restore", width: 300, min: 220, locked: true, stripe: true },
-  { id: "phase", label: "Phase", width: 140, min: 130 },
-  { id: "route", label: "Reads → writes", width: 220, min: 140 },
-  { id: "repository", label: "Repository", width: 240, min: 220 },
-  { id: "restored", label: "Restored", width: 140, min: 100, numeric: true },
-  { id: "started", label: "Started", width: 120, min: 110, numeric: true },
-];
-
 export function RestoreTable({ restores, now = new Date() }: RestoreTableProps) {
   return (
     <ColumnLedger
@@ -49,8 +40,30 @@ export function RestoreTable({ restores, now = new Date() }: RestoreTableProps) 
       rowKey={(r) => `${r.namespace}/${r.name}`}
       rowProps={() => ({ "data-kind": "restore" })}
       cell={(restore, id) => restoreCell(restore, id, now)}
+      sortValue={restoreSortValue}
     />
   );
+}
+
+function restoreSortValue(restore: RestoreRow, id: RestoreColumn): SortValue {
+  switch (id) {
+    case "restore":
+      return nameValue(restore.name, restore.namespace);
+    case "phase":
+      return healthRank(restorePhaseLamp(restore.phase).key);
+    case "repository":
+      return restore.repository ?? null;
+    case "restored":
+      // Bytes, the cell's first figure; a restore that reports only files
+      // has nothing comparable to sort by.
+      return restore.bytesRestored ?? null;
+    case "started":
+      return timeValue(restore.startTime);
+    case "route":
+      return null;
+    default:
+      return id satisfies never;
+  }
 }
 
 function restoreCell(restore: RestoreRow, id: RestoreColumn, now: Date): ReactNode {
