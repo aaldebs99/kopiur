@@ -17,7 +17,10 @@ use kube::api::{Api, AttachParams, DeleteParams, ListParams, LogParams, PostPara
 use tokio::io::AsyncReadExt;
 
 use kopiur_api::common::{MoverDefaults, RepositoryKind};
-use kopiur_api::consts::{SESSION_BROWSE, SESSION_LABEL, SESSION_REPO_LABEL};
+use kopiur_api::consts::{
+    SESSION_BROWSE, SESSION_CREDS_LABEL, SESSION_CREDS_PROJECTED, SESSION_LABEL,
+    SESSION_REPO_LABEL, SESSION_SNAPSHOT_ANNOTATION,
+};
 use kopiur_kopia::SessionCmd;
 use kopiur_mover::jobs::{self, JobLimits, MoverJobInputs, VolumeMountSpec};
 use kopiur_mover::repo_meta::{
@@ -27,7 +30,7 @@ use kopiur_mover::workspec::{
     BrowseSessionOp, MoverWorkSpec, Operation, ResolvedIdentity, TargetRef,
 };
 
-use super::resolve::{BrowseTarget, RepoHandle, session_creds_secrets};
+use super::resolve::{BrowseTarget, RepoHandle, SessionCreds, session_creds};
 use crate::ctx::OpsCtx;
 use crate::error::{OpsError, classify_kube};
 
@@ -457,11 +460,14 @@ async fn create_session_job(
         target.repo.namespace.as_deref(),
         &target.repo.name,
     );
-    // The browse session talks to a single repository; its Secret(s) load verbatim.
-    let creds_secrets: Vec<jobs::CredsEnvFrom> = session_creds_secrets(&target.repo, ns)?
-        .into_iter()
-        .map(jobs::CredsEnvFrom::plain)
+    // The browse session talks to a single repository; its Secret(s) load
+    // verbatim, from the operator's copies when they live elsewhere.
+    let creds = session_creds(target, &name)?;
+    let creds_secrets: Vec<jobs::CredsEnvFrom> = creds
+        .iter()
+        .map(|c| jobs::CredsEnvFrom::plain(c.env_from_name()))
         .collect();
+    let projection = session_projection_metadata(&creds, &target.snapshot);
     let work_spec = session_work_spec(target, ttl);
     let image = resolve_mover_image(ctx, image).await?;
 
@@ -482,6 +488,7 @@ async fn create_session_job(
     let workload_identity = kopiur_api::creds::backend_workload_identity(&target.repo.backend);
     let session_pod_meta = session_pod_metadata(target.repo.mover_defaults.as_ref());
     let mut labels = labels.clone();
+    labels.extend(projection.labels);
     if matches!(
         workload_identity,
         Some((_, kopiur_api::creds::WorkloadIdentityCloud::Azure))
@@ -529,7 +536,7 @@ async fn create_session_job(
         service_account: workload_identity.map(|(wi, _)| wi.service_account_name.as_str()),
         passthrough_env: Vec::new(),
         extra_env: Vec::new(),
-        annotations: Default::default(),
+        annotations: projection.annotations,
         cache_volume: Default::default(),
         scratch_volume: None,
         readiness_exec: Some(vec![SESSION_MOVER_BIN.to_string(), "ready".to_string()]),
@@ -562,6 +569,42 @@ async fn create_session_job(
         }
     };
     Ok(created.name_any())
+}
+
+/// What a session Job whose credentials the operator copies carries, so the
+/// operator finds it and can check it: the `session-creds=projected` label it
+/// watches, and the `Snapshot` it was started for, whose pinned opt-in the
+/// operator re-reads before copying anything.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SessionProjectionMetadata {
+    /// Labels added to the Job.
+    pub labels: BTreeMap<String, String>,
+    /// Annotations added to the Job.
+    pub annotations: BTreeMap<String, String>,
+}
+
+/// [`SessionProjectionMetadata`] for a session loading `creds`: empty unless one
+/// of them is a copy. Pure.
+pub fn session_projection_metadata(
+    creds: &[SessionCreds],
+    snapshot: &str,
+) -> SessionProjectionMetadata {
+    if !creds
+        .iter()
+        .any(|c| matches!(c, SessionCreds::Projected { .. }))
+    {
+        return SessionProjectionMetadata::default();
+    }
+    SessionProjectionMetadata {
+        labels: BTreeMap::from([(
+            SESSION_CREDS_LABEL.to_string(),
+            SESSION_CREDS_PROJECTED.to_string(),
+        )]),
+        annotations: BTreeMap::from([(
+            SESSION_SNAPSHOT_ANNOTATION.to_string(),
+            snapshot.to_string(),
+        )]),
+    }
 }
 
 /// The session Job's ownerReference: the Repository/ClusterRepository it holds
@@ -645,7 +688,8 @@ async fn wait_pod_ready(
 ) -> Result<String, OpsError> {
     let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
     let selector = format!("{JOB_NAME_LABEL}={job_name}");
-    let deadline = std::time::Instant::now() + READY_WAIT;
+    let started = std::time::Instant::now();
+    let deadline = started + READY_WAIT;
     progress.waiting(job_name);
     let result = loop {
         if std::time::Instant::now() > deadline {
@@ -665,6 +709,11 @@ async fn wait_pod_ready(
         if let Some(pod) = list.iter().find(|p| pod_is_ready(p)) {
             break Ok(pod.name_any());
         }
+        if started.elapsed() > MISSING_SECRET_GRACE
+            && let Some(secret) = list.iter().find_map(missing_secret)
+        {
+            break Err(stuck_on_secret(job_name, namespace, &secret));
+        }
         if let Some(failed) = list.iter().find(|p| pod_phase(p) == Some("Failed")) {
             let tail = pod_log_tail(&pods, &failed.name_any()).await;
             break Err(OpsError::SessionPodFailed {
@@ -678,6 +727,44 @@ async fn wait_pod_ready(
     };
     progress.waiting_done();
     result
+}
+
+/// How long a session pod may wait on a missing credential Secret before the
+/// wait gives up on it. The operator writes a projected copy within a second or
+/// two of the Job appearing; a pod still waiting after this is not going to get
+/// one.
+const MISSING_SECRET_GRACE: Duration = Duration::from_secs(30);
+
+/// The credential Secret a pod is waiting for, when the kubelet cannot start it
+/// because that Secret does not exist (`CreateContainerConfigError`,
+/// `secret "<name>" not found`). Pure.
+fn missing_secret(pod: &Pod) -> Option<String> {
+    pod.status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.state.as_ref()?.waiting.as_ref())
+        .filter(|w| w.reason.as_deref() == Some("CreateContainerConfigError"))
+        .find_map(|w| {
+            let message = w.message.as_deref()?;
+            let rest = message.strip_prefix("secret \"")?;
+            let (name, tail) = rest.split_once('"')?;
+            tail.trim_start()
+                .starts_with("not found")
+                .then(|| name.to_string())
+        })
+}
+
+/// The error for a session pod stuck on `secret`: the operator's missing copy,
+/// or a Secret of the session's own namespace that is not there. Pure.
+fn stuck_on_secret(job: &str, namespace: &str, secret: &str) -> OpsError {
+    OpsError::SessionCredsMissing {
+        job: job.to_string(),
+        namespace: namespace.to_string(),
+        secret: secret.to_string(),
+        projected: secret.starts_with(&format!("{job}-creds-")),
+    }
 }
 
 /// Whether a pod's `Ready` condition is `True`. Pure.
@@ -898,6 +985,88 @@ mod tests {
         assert!(job_is_terminal(&job(serde_json::json!([]), true)));
     }
 
+    fn waiting_pod(reason: &str, message: &str) -> Pod {
+        serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "kopiur-browse-nas-0123abcd-x7k2p" },
+            "status": {
+                "phase": "Pending",
+                "containerStatuses": [{
+                    "name": "mover",
+                    "image": "mover",
+                    "imageID": "",
+                    "ready": false,
+                    "restartCount": 0,
+                    "state": { "waiting": { "reason": reason, "message": message } }
+                }]
+            }
+        }))
+        .expect("pod fixture")
+    }
+
+    #[test]
+    fn a_pod_waiting_on_a_missing_secret_names_it() {
+        let pod = waiting_pod(
+            "CreateContainerConfigError",
+            "secret \"kopiur-browse-nas-0123abcd-creds-0\" not found",
+        );
+        assert_eq!(
+            missing_secret(&pod).as_deref(),
+            Some("kopiur-browse-nas-0123abcd-creds-0")
+        );
+        assert_eq!(
+            missing_secret(&waiting_pod("ContainerCreating", "")),
+            None,
+            "an ordinary start is not stuck"
+        );
+        assert_eq!(
+            missing_secret(&waiting_pod(
+                "CreateContainerConfigError",
+                "configmap \"x\" not found"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn a_missing_copy_points_at_the_operator_and_a_missing_secret_at_the_namespace() {
+        let job = "kopiur-browse-nas-0123abcd";
+        let copy = stuck_on_secret(job, "vaultwarden", &format!("{job}-creds-0")).to_string();
+        assert!(
+            copy.contains("features.credentialProjection.enabled"),
+            "{copy}"
+        );
+        let own = stuck_on_secret(job, "vaultwarden", "creds").to_string();
+        assert!(own.contains("create it in vaultwarden"), "{own}");
+    }
+
+    #[test]
+    fn a_session_loading_a_copy_is_marked_for_the_operator() {
+        let projected = [
+            SessionCreds::Direct("local".into()),
+            SessionCreds::Projected {
+                source_namespace: "kopiur".into(),
+                source_name: "creds".into(),
+                copy_name: "kopiur-browse-nas-0123abcd-creds-1".into(),
+            },
+        ];
+        let meta = session_projection_metadata(&projected, "db-1");
+        assert_eq!(
+            meta.labels.get(SESSION_CREDS_LABEL).map(String::as_str),
+            Some(SESSION_CREDS_PROJECTED)
+        );
+        assert_eq!(
+            meta.annotations
+                .get(SESSION_SNAPSHOT_ANNOTATION)
+                .map(String::as_str),
+            Some("db-1")
+        );
+        assert_eq!(
+            session_projection_metadata(&[SessionCreds::Direct("local".into())], "db-1"),
+            SessionProjectionMetadata::default(),
+            "a session that loads only its own namespace's Secrets asks for nothing"
+        );
+    }
+
     #[test]
     fn work_spec_pins_the_ttl_and_read_only_browse_operation() {
         use kopiur_api::backend::{Backend, FilesystemBackend};
@@ -925,6 +1094,7 @@ mod tests {
                 mover_defaults: None,
             },
             ca_bundle_pem: None,
+            projection: Default::default(),
         };
         let ws = session_work_spec(&target, Duration::from_secs(1800));
         match &ws.operation {

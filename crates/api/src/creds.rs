@@ -97,6 +97,17 @@ pub struct CredsSecretRef {
 /// its reap walks with this.
 pub const MAX_CREDS_IDX: usize = 1;
 
+/// The name of the operator's copy of the `idx`-th credential Secret for the
+/// browse session Job `job`: `{job}-creds-{idx}`.
+///
+/// One function for both sides, because they never talk: the session Job loads
+/// this name via `envFrom` before the copy exists, and the operator, seeing the
+/// Job, writes the copy under the same name. A session Job name is at most 47
+/// characters, so this always fits a DNS label without capping.
+pub fn browse_session_copy_name(job: &str, idx: usize) -> String {
+    format!("{job}-creds-{idx}")
+}
+
 /// The distinct credential Secrets a mover Job for `backend` + `encryption` needs
 /// as `envFrom`, each with its resolved *source* namespace: always the
 /// encryption-password Secret, plus the backend `auth` Secret when present and

@@ -25,8 +25,12 @@
 //! permits it. The UI's own ServiceAccount cannot exec into anything.
 //!
 //! No handler here reads a `Secret`. The session Job names credential Secrets for
-//! the kubelet to mount (`kopiur_ops::browse::resolve::session_creds_secrets`
-//! only produces names); the backend CA bundle is a `ConfigMap`.
+//! the kubelet to mount (`kopiur_ops::browse::resolve::session_creds` only
+//! produces names); the backend CA bundle is a `ConfigMap`. When a
+//! `ClusterRepository` keeps its Secret in another namespace, the Job names a
+//! copy that the operator writes beside it, under the same gates a backup's
+//! projection passes; neither the console nor the person browsing reads or
+//! writes it.
 
 pub mod download;
 pub mod session_pool;

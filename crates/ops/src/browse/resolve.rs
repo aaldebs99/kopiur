@@ -12,7 +12,7 @@ use kube::Api;
 use kube::ResourceExt;
 
 use crate::ctx::OpsCtx;
-use crate::error::{OpsError, classify_kube};
+use crate::error::{OpsError, ProjectionBlock, classify_kube};
 
 /// Everything the browse data-plane needs about one repository: identity (for
 /// the session Job's name/labels/owner), backend + encryption (for the work
@@ -62,6 +62,9 @@ pub struct BrowseTarget {
     /// resolution ([`resolve_ca_bundle`]) and carried here so both transports'
     /// work-spec builders stay pure.
     pub ca_bundle_pem: Option<String>,
+    /// Whether the operator may copy a credential Secret from another
+    /// namespace for the session ([`session_creds`]).
+    pub projection: SessionProjection,
 }
 
 /// Extract the kopia snapshot id a Snapshot pins in status, or say exactly why
@@ -85,25 +88,67 @@ pub fn kopia_id_of(snap: &Snapshot) -> Result<String, OpsError> {
     }
 }
 
-/// The credential Secret names a session pod in `session_namespace` loads via
-/// `envFrom` — refusing (actionably) any Secret that lives in a different
-/// namespace, since a pod cannot load one across namespaces. Pure.
-pub fn session_creds_secrets(
-    repo: &RepoHandle,
-    session_namespace: &str,
-) -> Result<Vec<String>, OpsError> {
+/// Whether the operator may copy a credential Secret from another namespace into
+/// a browse session's: the two gates a backup's projection passes, read off the
+/// objects the session resolved. The operator re-checks both before it copies
+/// anything; these only decide what the session Job asks for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionProjection {
+    /// The `ClusterRepository`'s `spec.credentialProjection.allowed`. Always
+    /// false for a namespaced `Repository`.
+    pub allowed: bool,
+    /// The browsed `Snapshot`'s pinned `status.resolved.credentialProjection`:
+    /// whether the run that took it opted in. Absent reads as no.
+    pub opted_in: bool,
+}
+
+/// One credential Secret a session pod loads via `envFrom`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionCreds {
+    /// The Secret is already in the session's namespace.
+    Direct(String),
+    /// The Secret lives elsewhere; the operator copies it to `copy_name` in the
+    /// session's namespace for as long as the session Job exists.
+    Projected {
+        /// Where the original lives.
+        source_namespace: String,
+        /// The original's name.
+        source_name: String,
+        /// The copy the pod loads.
+        copy_name: String,
+    },
+}
+
+impl SessionCreds {
+    /// The name the pod's `envFrom` loads.
+    pub fn env_from_name(&self) -> &str {
+        match self {
+            SessionCreds::Direct(name) => name,
+            SessionCreds::Projected { copy_name, .. } => copy_name,
+        }
+    }
+}
+
+/// The credential Secrets the session Job `job_name` loads via `envFrom`. One in
+/// the session's namespace loads directly. One elsewhere is a copy the operator
+/// writes, when the repository is a `ClusterRepository` that allows it and the
+/// snapshot's run opted in, the same gates a backup passes; otherwise it is
+/// refused, naming the gate. Pure.
+pub fn session_creds(target: &BrowseTarget, job_name: &str) -> Result<Vec<SessionCreds>, OpsError> {
+    let repo = &target.repo;
+    let session_namespace = target.namespace.as_str();
     let refs = mover_creds_secret_refs(&repo.backend, &repo.encryption, repo.namespace.as_deref());
-    let mut names = Vec::new();
-    for r in refs {
-        match r.namespace.as_deref() {
-            Some(ns) if ns == session_namespace => names.push(r.name),
-            Some(ns) => {
-                return Err(OpsError::CredsOutsideSessionNamespace {
-                    secret: r.name,
-                    secret_namespace: ns.to_string(),
-                    session_namespace: session_namespace.to_string(),
-                });
+    let mut creds = Vec::with_capacity(refs.len());
+    // Indexed by the ref's position, as the operator's copies are, so a
+    // same-namespace password beside a cross-namespace auth Secret still
+    // names the copy `-creds-1`.
+    for (idx, r) in refs.into_iter().enumerate() {
+        let source_namespace = match r.namespace {
+            Some(ns) if ns == session_namespace => {
+                creds.push(SessionCreds::Direct(r.name));
+                continue;
             }
+            Some(ns) => ns,
             // Only reachable for a ClusterRepository reference that pins no
             // namespace (the webhook normally refuses this).
             None => {
@@ -112,9 +157,52 @@ pub fn session_creds_secrets(
                     repository: repo.name.clone(),
                 });
             }
+        };
+        if let Some(blocked_by) = projection_block(target) {
+            return Err(OpsError::CredsOutsideSessionNamespace {
+                secret: r.name,
+                secret_namespace: source_namespace,
+                session_namespace: session_namespace.to_string(),
+                blocked_by,
+            });
         }
+        creds.push(SessionCreds::Projected {
+            source_namespace,
+            source_name: r.name,
+            copy_name: kopiur_api::creds::browse_session_copy_name(job_name, idx),
+        });
     }
-    Ok(names)
+    Ok(creds)
+}
+
+/// Whether the run that took `snap` opted into credential projection, from the
+/// pin it wrote (`status.resolved.credentialProjection`). A snapshot with no pin
+/// (it predates the field, or never ran) reads as no. Pure.
+pub fn snapshot_opted_in(snap: &Snapshot) -> bool {
+    snap.status
+        .as_ref()
+        .and_then(|s| s.resolved.as_ref())
+        .and_then(|r| r.credential_projection.as_ref())
+        .is_some_and(|p| p.enabled)
+}
+
+/// The first gate that keeps the operator from copying a Secret for this
+/// session, or `None` when it may.
+fn projection_block(target: &BrowseTarget) -> Option<ProjectionBlock> {
+    match target.repo.kind {
+        RepositoryKind::Repository => Some(ProjectionBlock::NotAClusterRepository),
+        RepositoryKind::ClusterRepository if !target.projection.allowed => {
+            Some(ProjectionBlock::OwnerNotAllowed {
+                repository: target.repo.name.clone(),
+            })
+        }
+        RepositoryKind::ClusterRepository if !target.projection.opted_in => {
+            Some(ProjectionBlock::ConsumerNotOptedIn {
+                snapshot: target.snapshot.clone(),
+            })
+        }
+        RepositoryKind::ClusterRepository => None,
+    }
 }
 
 /// Resolve `snapshot_name` in `namespace` into a [`BrowseTarget`], discovering
@@ -178,7 +266,7 @@ pub async fn resolve_with(
 
     // Exhaustive over the repository kinds (ADR §5.5): a new kind must decide
     // its fetch + namespace story here before it compiles.
-    let repo = match rref.kind {
+    let (repo, allowed) = match rref.kind {
         RepositoryKind::Repository => {
             // An absent ref namespace means "the Snapshot's own namespace".
             let repo_ns = rref.namespace.clone().unwrap_or_else(|| ns.clone());
@@ -204,7 +292,7 @@ pub async fn resolve_with(
                     e,
                 )
             })?;
-            RepoHandle {
+            let handle = RepoHandle {
                 kind: RepositoryKind::Repository,
                 name: r.name_any(),
                 uid: r.uid().unwrap_or_default(),
@@ -212,7 +300,9 @@ pub async fn resolve_with(
                 backend: r.spec.backend.clone(),
                 encryption: r.spec.encryption.clone(),
                 mover_defaults: r.spec.mover_defaults.clone(),
-            }
+            };
+            // A namespaced Repository never projects: its Secrets sit beside it.
+            (handle, false)
         }
         RepositoryKind::ClusterRepository => {
             let api: Api<ClusterRepository> = Api::all(ctx.client.clone());
@@ -226,7 +316,12 @@ pub async fn resolve_with(
                     e,
                 )
             })?;
-            RepoHandle {
+            let allowed = r
+                .spec
+                .credential_projection
+                .as_ref()
+                .is_some_and(|p| p.allowed);
+            let handle = RepoHandle {
                 kind: RepositoryKind::ClusterRepository,
                 name: r.name_any(),
                 uid: r.uid().unwrap_or_default(),
@@ -234,7 +329,8 @@ pub async fn resolve_with(
                 backend: r.spec.backend.clone(),
                 encryption: r.spec.encryption.clone(),
                 mover_defaults: r.spec.mover_defaults.clone(),
-            }
+            };
+            (handle, allowed)
         }
     };
 
@@ -245,6 +341,10 @@ pub async fn resolve_with(
         kopia_snapshot_id,
         repo,
         ca_bundle_pem,
+        projection: SessionProjection {
+            allowed,
+            opted_in: snapshot_opted_in(&snap),
+        },
     })
 }
 
@@ -554,45 +654,177 @@ mod tests {
         }
     }
 
+    fn target(repo: RepoHandle, projection: SessionProjection) -> BrowseTarget {
+        BrowseTarget {
+            snapshot: "db-1".into(),
+            namespace: "media".into(),
+            kopia_snapshot_id: "kdead".into(),
+            repo,
+            ca_bundle_pem: None,
+            projection,
+        }
+    }
+
+    const JOB: &str = "kopiur-browse-nas-0123abcd";
+    const BOTH: SessionProjection = SessionProjection {
+        allowed: true,
+        opted_in: true,
+    };
+
     #[test]
-    fn same_namespace_secret_is_allowed() {
-        let repo = repo_handle(RepositoryKind::Repository, Some("media"), None);
-        let names = session_creds_secrets(&repo, "media").unwrap();
-        assert_eq!(names, vec!["creds".to_string()]);
+    fn same_namespace_secret_loads_directly() {
+        let t = target(
+            repo_handle(RepositoryKind::Repository, Some("media"), None),
+            SessionProjection::default(),
+        );
+        assert_eq!(
+            session_creds(&t, JOB).unwrap(),
+            vec![SessionCreds::Direct("creds".into())]
+        );
     }
 
     #[test]
-    fn cross_namespace_secret_is_refused_with_the_namespaces_named() {
+    fn a_namespaced_repository_elsewhere_is_refused_without_offering_projection() {
         // Repository in `backups`, session (snapshot) in `media`: the secret
         // falls back to the repository's namespace, which the session pod
-        // cannot envFrom.
-        let repo = repo_handle(RepositoryKind::Repository, Some("backups"), None);
-        let err = session_creds_secrets(&repo, "media").unwrap_err();
+        // cannot envFrom, and only a ClusterRepository may project.
+        let t = target(
+            repo_handle(RepositoryKind::Repository, Some("backups"), None),
+            BOTH,
+        );
+        let err = session_creds(&t, JOB).unwrap_err();
+        assert!(matches!(
+            err,
+            OpsError::CredsOutsideSessionNamespace {
+                blocked_by: ProjectionBlock::NotAClusterRepository,
+                ..
+            }
+        ));
         let msg = err.to_string();
         assert!(msg.contains("namespace backups"), "{msg}");
         assert!(msg.contains("--local"), "{msg}");
     }
 
     #[test]
-    fn cluster_repo_pinned_secret_matches_or_is_refused() {
-        // Pinned to the session namespace: fine.
-        let repo = repo_handle(RepositoryKind::ClusterRepository, None, Some("media"));
-        assert_eq!(
-            session_creds_secrets(&repo, "media").unwrap(),
-            vec!["creds".to_string()]
+    fn a_cluster_repository_secret_elsewhere_is_projected_when_both_gates_hold() {
+        let t = target(
+            repo_handle(RepositoryKind::ClusterRepository, None, Some("kopiur")),
+            BOTH,
         );
-        // Pinned elsewhere: actionable refusal.
-        let repo = repo_handle(RepositoryKind::ClusterRepository, None, Some("backups"));
+        assert_eq!(
+            session_creds(&t, JOB).unwrap(),
+            vec![SessionCreds::Projected {
+                source_namespace: "kopiur".into(),
+                source_name: "creds".into(),
+                copy_name: format!("{JOB}-creds-0"),
+            }]
+        );
+    }
+
+    #[test]
+    fn each_closed_gate_is_named_in_the_refusal() {
+        let repo = || repo_handle(RepositoryKind::ClusterRepository, None, Some("kopiur"));
+        let owner_closed = session_creds(
+            &target(
+                repo(),
+                SessionProjection {
+                    allowed: false,
+                    opted_in: true,
+                },
+            ),
+            JOB,
+        )
+        .unwrap_err();
         assert!(matches!(
-            session_creds_secrets(&repo, "media"),
-            Err(OpsError::CredsOutsideSessionNamespace { .. })
+            &owner_closed,
+            OpsError::CredsOutsideSessionNamespace {
+                blocked_by: ProjectionBlock::OwnerNotAllowed { repository },
+                ..
+            } if repository == "nas"
         ));
+        assert!(
+            owner_closed
+                .to_string()
+                .contains("spec.credentialProjection.allowed"),
+            "{owner_closed}"
+        );
+
+        let consumer_closed = session_creds(
+            &target(
+                repo(),
+                SessionProjection {
+                    allowed: true,
+                    opted_in: false,
+                },
+            ),
+            JOB,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            &consumer_closed,
+            OpsError::CredsOutsideSessionNamespace {
+                blocked_by: ProjectionBlock::ConsumerNotOptedIn { snapshot },
+                ..
+            } if snapshot == "db-1"
+        ));
+        assert!(
+            consumer_closed
+                .to_string()
+                .contains("spec.credentialProjection.enabled"),
+            "{consumer_closed}"
+        );
+    }
+
+    #[test]
+    fn a_cluster_repository_secret_pinned_to_the_session_namespace_loads_directly() {
+        let t = target(
+            repo_handle(RepositoryKind::ClusterRepository, None, Some("media")),
+            SessionProjection::default(),
+        );
+        assert_eq!(
+            session_creds(&t, JOB).unwrap(),
+            vec![SessionCreds::Direct("creds".into())]
+        );
         // No namespace at all on a cluster repo ref: names the CRD field.
-        let repo = repo_handle(RepositoryKind::ClusterRepository, None, None);
-        let msg = session_creds_secrets(&repo, "media")
-            .unwrap_err()
-            .to_string();
+        let t = target(
+            repo_handle(RepositoryKind::ClusterRepository, None, None),
+            BOTH,
+        );
+        let msg = session_creds(&t, JOB).unwrap_err().to_string();
         assert!(msg.contains("secretRef.namespace"), "{msg}");
+    }
+
+    #[test]
+    fn a_snapshot_opted_in_only_when_its_run_pinned_projection_on() {
+        let with = |resolved: serde_json::Value| {
+            snap(serde_json::json!({
+                "apiVersion": "kopiur.home-operations.com/v1alpha1",
+                "kind": "Snapshot",
+                "metadata": { "name": "db-1", "namespace": "media" },
+                "spec": {},
+                "status": { "resolved": resolved }
+            }))
+        };
+        assert!(snapshot_opted_in(&with(
+            serde_json::json!({ "credentialProjection": { "enabled": true } })
+        )));
+        assert!(!snapshot_opted_in(&with(
+            serde_json::json!({ "credentialProjection": { "enabled": false } })
+        )));
+        assert!(
+            !snapshot_opted_in(&with(serde_json::json!({}))),
+            "no pin is no"
+        );
+    }
+
+    #[test]
+    fn the_copy_name_is_the_one_the_operator_writes() {
+        // The session Job and the operator agree on the name through one
+        // shared function; this pins that the session uses it, per source.
+        assert_eq!(
+            kopiur_api::creds::browse_session_copy_name(JOB, 1),
+            format!("{JOB}-creds-1")
+        );
     }
 
     #[test]

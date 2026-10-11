@@ -219,9 +219,16 @@ fn cross_namespace_creds_offer_three_outs() {
         secret: "s3-creds".into(),
         secret_namespace: "backups".into(),
         session_namespace: "media".into(),
+        blocked_by: crate::error::ProjectionBlock::OwnerNotAllowed {
+            repository: "shared".into(),
+        },
     }
     .to_string();
     assert!(msg.contains("\"s3-creds\""), "{msg}");
+    assert!(
+        msg.contains("set spec.credentialProjection.allowed: true on ClusterRepository shared"),
+        "{msg}"
+    );
     assert!(msg.contains("namespace backups"), "{msg}");
     assert!(
         msg.contains("cannot load a Secret from another namespace"),

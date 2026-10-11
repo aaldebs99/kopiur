@@ -3,6 +3,65 @@
 //! is unit-tested). Both `kubectl kopiur` and the web UI render these — the CLI
 //! prints the message, a server maps [`OpsError::kind`] onto a status code.
 
+/// Why the operator will not copy a credential Secret into a browse session's
+/// namespace: the gates a backup's projection passes, read for the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionBlock {
+    /// Only a `ClusterRepository`'s Secrets are ever projected; a namespaced
+    /// `Repository` keeps its Secrets beside it.
+    NotAClusterRepository,
+    /// The `ClusterRepository` does not allow its Secrets to be copied out.
+    OwnerNotAllowed {
+        /// The `ClusterRepository`'s name.
+        repository: String,
+    },
+    /// The run that took this `Snapshot` did not opt into projection, so the
+    /// session may not either: browsing never widens what the backup was allowed.
+    ConsumerNotOptedIn {
+        /// The `Snapshot`'s name.
+        snapshot: String,
+    },
+}
+
+impl ProjectionBlock {
+    /// The change that would let the operator copy it.
+    pub fn fix(&self) -> String {
+        match self {
+            ProjectionBlock::NotAClusterRepository => {
+                "keep the Repository and its Secret in the snapshot's namespace".to_string()
+            }
+            ProjectionBlock::OwnerNotAllowed { repository } => format!(
+                "set spec.credentialProjection.allowed: true on ClusterRepository {repository}"
+            ),
+            ProjectionBlock::ConsumerNotOptedIn { .. } => {
+                "set spec.credentialProjection.enabled: true on the SnapshotPolicy, and \
+                 browse a snapshot it takes after that"
+                    .to_string()
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for ProjectionBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProjectionBlock::NotAClusterRepository => {
+                f.write_str("Only a ClusterRepository's Secrets are copied for a session")
+            }
+            ProjectionBlock::OwnerNotAllowed { repository } => write!(
+                f,
+                "ClusterRepository {repository} does not allow its Secrets to be copied \
+                 into other namespaces"
+            ),
+            ProjectionBlock::ConsumerNotOptedIn { snapshot } => write!(
+                f,
+                "Snapshot {snapshot} was taken without credentialProjection, so its \
+                 credentials are not copied for a session either"
+            ),
+        }
+    }
+}
+
 /// Everything a kopiur operation can fail with. Exhaustive — a new failure mode
 /// is a new variant, never a stringly-typed catch-all.
 #[derive(Debug, thiserror::Error)]
@@ -256,11 +315,13 @@ pub enum OpsError {
     },
 
     /// The repository's credential Secret lives outside the namespace the
-    /// session pod would run in (a pod cannot `envFrom` across namespaces).
+    /// session pod would run in (a pod cannot `envFrom` across namespaces), and
+    /// the operator may not copy it there for the session.
     #[error(
         "credential Secret {secret:?} is in namespace {secret_namespace}, but the \
          browse session runs in {session_namespace}, and a pod cannot load a Secret \
-         from another namespace. Fix: copy the Secret into {session_namespace}, or use --local"
+         from another namespace. {blocked_by}. Fix: {}, or use --local",
+        blocked_by.fix()
     )]
     CredsOutsideSessionNamespace {
         /// The credential Secret name.
@@ -269,6 +330,8 @@ pub enum OpsError {
         secret_namespace: String,
         /// Where the session pod runs (the Snapshot's namespace).
         session_namespace: String,
+        /// Which gate kept the operator from copying it for the session.
+        blocked_by: ProjectionBlock,
     },
 
     /// A ClusterRepository credential reference pins no namespace, so the
@@ -296,6 +359,30 @@ pub enum OpsError {
         namespace: String,
         /// Failure detail (pod state + log tail when available).
         detail: String,
+    },
+
+    /// The session pod cannot start because a credential Secret it loads does
+    /// not exist in its namespace.
+    #[error(
+        "the browse session pod (Job {job}) cannot start: credential Secret {secret:?} \
+         does not exist in namespace {namespace}. Fix: {}",
+        if *projected {
+            "the operator copies it in when a session starts; check that the chart \
+             enables features.credentialProjection.enabled and that the operator is \
+             running, then retry".to_string()
+        } else {
+            format!("create it in {namespace}, then retry")
+        }
+    )]
+    SessionCredsMissing {
+        /// The session Job name.
+        job: String,
+        /// The session's namespace.
+        namespace: String,
+        /// The Secret the pod is waiting for.
+        secret: String,
+        /// Whether it is the operator's copy of a Secret from another namespace.
+        projected: bool,
     },
 
     /// Waiting for the session pod to become ready timed out.
@@ -465,6 +552,7 @@ impl OpsError {
             OpsError::Api { .. }
             | OpsError::SessionExec { .. }
             | OpsError::SessionPodFailed { .. }
+            | OpsError::SessionCredsMissing { .. }
             | OpsError::MoverImageUnresolvable { .. }
             | OpsError::OperatorNamespaceUnresolvable { .. }
             | OpsError::CaBundleUnresolvable { .. }

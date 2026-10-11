@@ -16,4 +16,6 @@ pub mod suspend;
 pub mod wait;
 
 pub use ctx::{OpsCtx, Scope, merge_patch_params};
-pub use error::{KIND_NOT_FOUND_NEEDLE, OpsError, OpsErrorKind, classify_kube, scope_suffix};
+pub use error::{
+    KIND_NOT_FOUND_NEEDLE, OpsError, OpsErrorKind, ProjectionBlock, classify_kube, scope_suffix,
+};

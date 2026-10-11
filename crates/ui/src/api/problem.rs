@@ -28,7 +28,7 @@ use axum::extract::OriginalUri;
 use axum::http::{Extensions, HeaderValue, Response, StatusCode, Uri, header};
 use axum::response::IntoResponse;
 
-use kopiur_ops::error::{OpsError, OpsErrorKind};
+use kopiur_ops::error::{OpsError, OpsErrorKind, ProjectionBlock};
 use kopiur_ui_model::problem::Problem;
 
 use crate::auth::csrf::CsrfError;
@@ -301,7 +301,7 @@ impl From<OpsError> for ApiError {
 /// Remediations the shared `OpsError` text words for the CLI and the UI must
 /// word for a browser.
 ///
-/// Only these two: every other `Fix:` in `kopiur_ops` is already UI-safe, and
+/// Only these: every other `Fix:` in `kopiur_ops` is already UI-safe, and
 /// duplicating them here is how they would drift.
 /// Exhaustive over `OpsError` — no `_` arm — so a new variant whose CLI message
 /// names a flag must be classified here before it compiles.
@@ -316,6 +316,21 @@ fn ui_fix(error: &OpsError) -> Option<&'static str> {
         OpsError::AmbiguousTarget { .. } => Some(
             "set `kind` in the request body to `RepositoryReplication` or `SnapshotReplication`",
         ),
+        // The CLI text ends "or use --local", which a browser has no way to do.
+        // The console names the setting that lets the operator copy the Secret.
+        OpsError::CredsOutsideSessionNamespace { blocked_by, .. } => Some(match blocked_by {
+            ProjectionBlock::OwnerNotAllowed { .. } => {
+                "set `spec.credentialProjection.allowed: true` on the ClusterRepository, so the \
+                 operator copies its credentials for the session as it does for backups"
+            }
+            ProjectionBlock::ConsumerNotOptedIn { .. } => {
+                "set `spec.credentialProjection.enabled: true` on the SnapshotPolicy; snapshots \
+                 it takes after that can be browsed"
+            }
+            ProjectionBlock::NotAClusterRepository => {
+                "keep the Repository and its credential Secret in the snapshot's namespace"
+            }
+        }),
 
         OpsError::SelectorMatchedNothing { .. }
         | OpsError::Forbidden { .. }
@@ -333,9 +348,9 @@ fn ui_fix(error: &OpsError) -> Option<&'static str> {
         | OpsError::Serialization { .. }
         | OpsError::SnapshotNotBrowsable { .. }
         | OpsError::RepositoryUnderivable { .. }
-        | OpsError::CredsOutsideSessionNamespace { .. }
         | OpsError::ClusterRepoSecretNamespaceMissing { .. }
         | OpsError::SessionPodFailed { .. }
+        | OpsError::SessionCredsMissing { .. }
         | OpsError::SessionNotReady { .. }
         | OpsError::SessionExec { .. }
         | OpsError::InvalidPath { .. }
@@ -377,6 +392,7 @@ fn kube_reason(error: &OpsError) -> Option<String> {
         | OpsError::CredsOutsideSessionNamespace { .. }
         | OpsError::ClusterRepoSecretNamespaceMissing { .. }
         | OpsError::SessionPodFailed { .. }
+        | OpsError::SessionCredsMissing { .. }
         | OpsError::SessionNotReady { .. }
         | OpsError::SessionExec { .. }
         | OpsError::InvalidPath { .. }
@@ -782,6 +798,47 @@ mod tests {
             !api.0.fix.contains("--kind"),
             "a browser cannot pass a CLI flag"
         );
+    }
+
+    #[test]
+    fn a_session_that_cannot_load_its_credentials_names_the_setting_not_a_flag() {
+        let refused = |blocked_by| {
+            ApiError::from(OpsError::CredsOutsideSessionNamespace {
+                secret: "kopia-rustfs-creds".to_string(),
+                secret_namespace: "kopiur".to_string(),
+                session_namespace: "vaultwarden".to_string(),
+                blocked_by,
+            })
+        };
+        let owner = refused(ProjectionBlock::OwnerNotAllowed {
+            repository: "rustfs".to_string(),
+        });
+        assert_eq!(
+            owner.0.fix,
+            "set `spec.credentialProjection.allowed: true` on the ClusterRepository, so the \
+             operator copies its credentials for the session as it does for backups"
+        );
+        let consumer = refused(ProjectionBlock::ConsumerNotOptedIn {
+            snapshot: "vaultwarden-1".to_string(),
+        });
+        assert_eq!(
+            consumer.0.fix,
+            "set `spec.credentialProjection.enabled: true` on the SnapshotPolicy; snapshots it \
+             takes after that can be browsed"
+        );
+        let namespaced = refused(ProjectionBlock::NotAClusterRepository);
+        assert_eq!(
+            namespaced.0.fix,
+            "keep the Repository and its credential Secret in the snapshot's namespace"
+        );
+        for api in [owner, consumer, namespaced] {
+            assert!(!api.0.fix.contains("--local"), "{}", api.0.fix);
+            assert!(
+                api.0.what.contains("kopiur"),
+                "the what still names where the Secret is: {}",
+                api.0.what
+            );
+        }
     }
 
     #[test]
