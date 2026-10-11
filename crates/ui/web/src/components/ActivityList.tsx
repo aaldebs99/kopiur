@@ -1,9 +1,9 @@
 import type { ActivityItem } from "./activity";
-import { relativeTime } from "../util/format";
 import { LampBadge } from "./HealthBadge";
 import { InspectLink } from "./InspectLink";
 import { KindChip, KindName } from "./KindMark";
 import { KIND_META } from "./kind";
+import { RowTime } from "./RowTime";
 
 /**
  * The overview's "Recent activity": one compact row per run, newest first,
@@ -31,9 +31,7 @@ export function ActivityList({ items, now }: { items: readonly ActivityItem[]; n
             </span>
             <span className="activity-row__state">
               <LampBadge lamp={item.lamp} />
-              <time className="attention-row__at" dateTime={item.at}>
-                {relativeTime(item.at, now)}
-              </time>
+              <RowTime at={item.at} now={now} />
             </span>
             {item.what.length > 0 ? <p className="activity-row__what">{item.what}</p> : null}
           </li>

@@ -1,13 +1,13 @@
 import { Link } from "@tanstack/react-router";
 import { Stethoscope } from "lucide-react";
 
-import { relativeTime } from "../util/format";
 import type { Attention, AttentionItem, AttentionProblem } from "./attention";
 import { HealthBadge, LampBadge } from "./HealthBadge";
 import { InspectLink } from "./InspectLink";
 import { KindChip, KindName } from "./KindMark";
 import { doctorOutcomeLamp } from "./doctor";
 import { KIND_META } from "./kind";
+import { RowTime } from "./RowTime";
 
 /**
  * The overview's "Needs attention": every object that needs someone as one
@@ -79,11 +79,7 @@ function ObjectRow({ item, now }: { item: AttentionItem; now: Date }) {
       </span>
       <span className="attention-row__state">
         <HealthBadge health={item.health} label={item.state} />
-        {item.at !== undefined ? (
-          <time className="attention-row__at" dateTime={item.at}>
-            {relativeTime(item.at, now)}
-          </time>
-        ) : null}
+        {item.at !== undefined ? <RowTime at={item.at} now={now} /> : null}
       </span>
       <Problems problems={item.problems} />
     </li>
