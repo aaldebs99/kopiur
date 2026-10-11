@@ -35,6 +35,12 @@
 //!    cleanup finalizer — the delete Job re-projects against the opt-in pinned into
 //!    `status.resolved.credentialProjection` at run time.
 //!
+//! 8. **A browse session gets its own copy, which goes with the session.** `ls` on a
+//!    projection-on snapshot in the creds-less namespace starts a session Job that
+//!    names `<job>-creds-0`; the operator writes it, owned by the Job, the listing
+//!    succeeds, and ending the session takes the copy with it. With the repository's
+//!    `allowed` turned off, a new session is refused, naming that setting.
+//!
 //! Scenario 7 is the ordering the others structurally cannot catch: every one of them
 //! deletes the Snapshot before the policy, keeping the recipe alive exactly as long as
 //! the delete path happens to need it. That is not a property of the operator — it is a
@@ -53,10 +59,12 @@ use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
 use kube::{Api, ResourceExt};
 use serde::de::DeserializeOwned;
 
+use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Secret, ServiceAccount};
 use k8s_openapi::api::rbac::v1::RoleBinding;
 
 use kopiur_api::{ClusterRepository, Maintenance, Restore, Snapshot, SnapshotPolicy};
+use kopiur_e2e::cli::run_cli;
 use kopiur_e2e::consts::{PROJECTION_NS, SECRET_S3_CREDS};
 use kopiur_e2e::{E2E_NAMESPACE, Need, World, default_timeout, poll_interval, wait_until};
 
@@ -1037,5 +1045,157 @@ async fn maintenance_reuses_one_stable_projected_secret_across_runs() {
     );
 
     let _ = maints.delete(maint, &DeleteParams::default()).await;
+    let _ = crepos.delete(crepo, &DeleteParams::default()).await;
+}
+
+/// **Browse through a projected copy.** A snapshot taken with projection into the
+/// creds-less namespace is browsed there: the session Job names a copy of the
+/// ClusterRepository's Secret, the operator writes it owned by the Job, the read
+/// succeeds, and ending the session removes the copy. Driven through the CLI, whose
+/// in-cluster session is the same `kopiur_ops` path the console uses.
+#[tokio::test]
+#[ignore = "requires the e2e harness (mise run //crates/e2e:test): kind + MinIO + built images + helm install"]
+async fn a_browse_session_reads_through_a_copy_that_goes_with_it() {
+    let Some(world) = World::connect().await else {
+        return;
+    };
+    world
+        .ensure(&[Need::Minio, Need::ProjectionNs])
+        .await
+        .expect("provision MinIO + projection namespace (source PVC, no creds Secret)");
+    let client = world.client().clone();
+    let crepos: Api<ClusterRepository> = Api::all(client.clone());
+    let configs: Api<SnapshotPolicy> = Api::namespaced(client.clone(), PROJECTION_NS);
+    let backups: Api<Snapshot> = Api::namespaced(client.clone(), PROJECTION_NS);
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), PROJECTION_NS);
+    let jobs: Api<Job> = Api::namespaced(client.clone(), PROJECTION_NS);
+
+    let crepo = "e2e-proj-browse-crepo";
+    let cfg = "e2e-proj-browse-cfg";
+    let backup = "e2e-proj-browse";
+    let sessions =
+        kube::api::ListParams::default().labels("kopiur.home-operations.com/session=browse");
+
+    // Rerun hygiene: a killed run leaves a warm session and its copy behind.
+    let _ = run_cli(&["-n", PROJECTION_NS, "session", "end", backup]);
+    let _ = backups.delete(backup, &DeleteParams::default()).await;
+    let _ = configs.delete(cfg, &DeleteParams::default()).await;
+
+    if crepos.get_opt(crepo).await.unwrap().is_none() {
+        crepos
+            .create(
+                &PostParams::default(),
+                &cr(s3_cluster_repository_json(crepo, "kopiur-proj-browse")),
+            )
+            .await
+            .expect("create S3 ClusterRepository");
+    }
+    wait_phase(&crepos, crepo, "Ready")
+        .await
+        .expect("ClusterRepository should bootstrap to Ready");
+    configs
+        .create(
+            &PostParams::default(),
+            &cr(backup_config_json(PROJECTION_NS, cfg, crepo, true)),
+        )
+        .await
+        .expect("create SnapshotPolicy with projection");
+    wait_until(
+        &format!("Snapshot {PROJECTION_NS}/{backup} created"),
+        default_timeout(),
+        poll_interval(),
+        || async {
+            backups
+                .create(
+                    &PostParams::default(),
+                    &cr(backup_json(PROJECTION_NS, backup, cfg)),
+                )
+                .await
+                .map(Some)
+                .or_else(|e| match e {
+                    kube::Error::Api(ae) if ae.code == 409 => Ok(None),
+                    other => Err(other),
+                })
+        },
+    )
+    .await
+    .expect("create Snapshot");
+    wait_phase(&backups, backup, "Succeeded")
+        .await
+        .expect("the projected backup should succeed, so there is something to browse");
+
+    // 1. The listing succeeds where the namespace holds no credential Secret.
+    let out = run_cli(&["-n", PROJECTION_NS, "ls", backup]);
+    assert!(
+        out.success,
+        "ls through a projected session failed.\nstdout: {}\nstderr: {}",
+        out.stdout, out.stderr
+    );
+
+    // 2. The copy is the one the Job asks for, owned by that Job.
+    let session = jobs
+        .list(&sessions)
+        .await
+        .expect("list session Jobs")
+        .items
+        .into_iter()
+        .find(|j| {
+            j.labels()
+                .get("kopiur.home-operations.com/session-creds")
+                .is_some_and(|v| v == "projected")
+        })
+        .expect("ls must have started a projected session Job");
+    let job_name = session.name_any();
+    let copy_name = format!("{job_name}-creds-0");
+    let copy = secrets
+        .get_opt(&copy_name)
+        .await
+        .expect("read the session's copy")
+        .unwrap_or_else(|| panic!("the operator must have written {copy_name}"));
+    assert!(
+        copy.owner_references()
+            .iter()
+            .any(|o| o.kind == "Job" && o.name == job_name && o.controller == Some(true)),
+        "the copy must be owned by the session Job, so it goes with the session"
+    );
+
+    // 3. Ending the session takes the copy with it.
+    let out = run_cli(&["-n", PROJECTION_NS, "session", "end", backup]);
+    assert!(out.success, "session end failed: {}", out.stderr);
+    wait_until(
+        &format!("{PROJECTION_NS}/{copy_name} to go with its session"),
+        default_timeout(),
+        poll_interval(),
+        || async {
+            secrets
+                .get_opt(&copy_name)
+                .await
+                .map(|s| if s.is_none() { Some(()) } else { None })
+        },
+    )
+    .await
+    .expect("the copy must be garbage-collected with the session Job");
+
+    // 4. With the owner's allow withdrawn, a new session is refused, naming it.
+    crepos
+        .patch(
+            crepo,
+            &PatchParams::default(),
+            &Patch::Merge(serde_json::json!({
+                "spec": { "credentialProjection": { "allowed": false } }
+            })),
+        )
+        .await
+        .expect("withdraw the owner's allow");
+    let out = run_cli(&["-n", PROJECTION_NS, "ls", backup]);
+    assert!(!out.success, "ls must be refused once allowed is false");
+    assert!(
+        out.stderr.contains("spec.credentialProjection.allowed"),
+        "the refusal must name the setting to change: {}",
+        out.stderr
+    );
+
+    let _ = backups.delete(backup, &DeleteParams::default()).await;
+    let _ = configs.delete(cfg, &DeleteParams::default()).await;
     let _ = crepos.delete(crepo, &DeleteParams::default()).await;
 }

@@ -428,6 +428,8 @@ pub const BUCKETS: &[&str] = &[
     "kopiur-proj-restore",
     "kopiur-proj-maint",
     "kopiur-proj-stable",
+    // A browse session reads through the operator's copy, which goes with it.
+    "kopiur-proj-browse",
     // #255: the SnapshotPolicy is deleted BEFORE its Snapshot, so the delete Job must
     // re-project credentials against the opt-in pinned at run time.
     "kopiur-proj-orphan",
