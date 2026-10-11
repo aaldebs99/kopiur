@@ -79,7 +79,7 @@ function ObjectRow({ item, now }: { item: AttentionItem; now: Date }) {
       </span>
       <span className="attention-row__state">
         <HealthBadge health={item.health} label={item.state} />
-        {item.at !== undefined ? <RowTime at={item.at} now={now} /> : null}
+        {item.at !== undefined ? <RowTime at={item.at} now={now} target={target} /> : null}
       </span>
       <Problems problems={item.problems} />
     </li>

@@ -31,7 +31,7 @@ export function ActivityList({ items, now }: { items: readonly ActivityItem[]; n
             </span>
             <span className="activity-row__state">
               <LampBadge lamp={item.lamp} />
-              <RowTime at={item.at} now={now} />
+              <RowTime at={item.at} now={now} target={target} />
             </span>
             {item.what.length > 0 ? <p className="activity-row__what">{item.what}</p> : null}
           </li>

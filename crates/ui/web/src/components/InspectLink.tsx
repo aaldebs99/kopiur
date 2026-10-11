@@ -18,6 +18,8 @@ export interface InspectLinkProps {
   /** More `data-*` hooks for the anchor (a topology plate's node id, health, …). */
   data?: Readonly<Record<`data-${string}`, string | undefined>> | undefined;
   onClick?: (() => void) | undefined;
+  /** `-1` for a second link to an object a row already links once. */
+  tabIndex?: number | undefined;
   children: ReactNode;
 }
 
@@ -45,6 +47,7 @@ export function InspectLink({
   "data-kind": dataKind,
   data,
   onClick,
+  tabIndex,
   children,
 }: InspectLinkProps) {
   const router = useRouter();
@@ -69,6 +72,7 @@ export function InspectLink({
       resetScroll={false}
       className={className}
       aria-label={ariaLabel}
+      tabIndex={tabIndex}
       data-kind={dataKind}
       {...data}
       onClick={(event) => {
