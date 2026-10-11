@@ -43,6 +43,7 @@ use kopiur_ui_model::views::{
 
 use crate::AppState;
 use crate::api::problem::{ApiError, problem};
+use crate::api::snapshot_sort::{parse_sort, sort_rows};
 use crate::api::{
     RepositoryKindPath, UiPath, UiQuery, client_for, conditions_view, gate_hits, list_too_large,
     ops_ctx, origin_view, paginate, repo_ref_display, snapshot_phase_view,
@@ -117,6 +118,10 @@ pub struct SnapshotQuery {
     /// Maximum rows to return; clamped to [`MAX_LIMIT`].
     #[serde(default)]
     pub limit: Option<usize>,
+    /// The column to order by before paging, `-` in front for descending
+    /// (`-size`); absent is newest run first. See [`super::snapshot_sort`].
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 /// The filters [`filter_rows`] applies, already parsed.
@@ -1007,8 +1012,18 @@ async fn list(
     }
 
     let rows: Vec<SnapshotRow> = matched.iter().map(|s| view_row(s)).collect();
+    Ok(Json(sorted_page(rows, &q)?))
+}
+
+/// **Pure.** The window `q` asks for, taken after ordering by its `sort`, so
+/// page two continues page one's order rather than the default one.
+pub fn sorted_page(
+    mut rows: Vec<SnapshotRow>,
+    q: &SnapshotQuery,
+) -> Result<Page<SnapshotRow>, ApiError> {
+    sort_rows(&mut rows, parse_sort(q.sort.as_deref())?);
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    Ok(Json(paginate(rows, q.offset.unwrap_or(0), limit)))
+    Ok(paginate(rows, q.offset.unwrap_or(0), limit))
 }
 
 /// `GET /api/v1/snapshots/{namespace}/{name}`
@@ -1336,6 +1351,42 @@ fn snapshot_not_found(namespace: &str, name: &str) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sorted_list_is_paged_after_it_is_sorted() {
+        let q: SnapshotQuery = serde_json::from_value(serde_json::json!({
+            "sort": "-size",
+            "offset": 1,
+            "limit": 2,
+        }))
+        .expect("sort is a query parameter");
+        let rows: Vec<SnapshotRow> = [("a", 1), ("b", 30), ("c", 20), ("d", 10)]
+            .iter()
+            .map(|(name, size)| {
+                serde_json::from_value(serde_json::json!({
+                    "namespace": "media", "name": name, "pinned": false, "sizeBytes": size,
+                }))
+                .unwrap()
+            })
+            .collect();
+        let page = sorted_page(rows, &q).expect("a known sort");
+        let names: Vec<&str> = page.items.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["c", "d"],
+            "page two of largest-first, not of the default order"
+        );
+        assert!(
+            sorted_page(
+                Vec::new(),
+                &SnapshotQuery {
+                    sort: Some("nope".into()),
+                    ..SnapshotQuery::default()
+                }
+            )
+            .is_err()
+        );
+    }
     use kopiur_api::testutil::from_yaml;
     use kopiur_ui_model::views::{OriginView, SnapshotPhaseView};
 

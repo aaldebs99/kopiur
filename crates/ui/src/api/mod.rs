@@ -40,6 +40,7 @@ pub mod replications;
 pub mod repositories;
 pub mod restores;
 pub mod schedules;
+pub mod snapshot_sort;
 pub mod snapshots;
 pub mod status;
 
