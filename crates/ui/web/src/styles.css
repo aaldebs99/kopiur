@@ -811,7 +811,8 @@ a.object-name:hover {
   background: var(--bg-hover);
 }
 
-.attention-row:has(.row-link) :is(a, button):not(.row-link) {
+/* A titled time sits above the cover too, so hovering it shows its instant. */
+.attention-row:has(.row-link) :is(a, button, time[title]):not(.row-link) {
   position: relative;
   z-index: 1;
 }
@@ -1027,7 +1028,7 @@ a.object-name:hover {
   grid-area: id;
 }
 
-.activity-row :is(a, button):not(.row-link) {
+.activity-row :is(a, button, time[title]):not(.row-link) {
   position: relative;
   z-index: 1;
 }
