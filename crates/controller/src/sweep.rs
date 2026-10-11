@@ -1258,6 +1258,32 @@ mod tests {
     }
 
     #[test]
+    fn a_browse_sessions_copy_is_left_to_its_job() {
+        // A browse session's copy is owned by the session Job, which garbage
+        // collection removes it with. Even idle and old, and even if a Snapshot
+        // with the same uid were terminal, neither kernel may take it: the pod
+        // may still be reading through it.
+        let mut s = stable_secret(
+            "vaultwarden",
+            "kopiur-browse-rustfs-0123abcd-creds-0",
+            "job-uid",
+            30 * DAY,
+        );
+        s.metadata.owner_references = Some(vec![owner_ref("Job", "job-uid", "batch")]);
+        assert!(
+            terminal_creds_candidates(
+                std::slice::from_ref(&s),
+                &uids(&["job-uid"]),
+                &HashSet::new(),
+                HOUR,
+                NOW
+            )
+            .is_empty()
+        );
+        assert!(legacy_creds_candidates(&[s], &HashSet::new(), HOUR, NOW).is_empty());
+    }
+
+    #[test]
     fn a_foreign_or_unowned_copy_is_never_reaped() {
         let terminal = uids(&["uid-1"]);
         // Owned by a Snapshot in someone else's API group (a same-named CRD).

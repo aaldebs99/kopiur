@@ -140,6 +140,13 @@ impl CredsPrefix {
     pub fn snapshot_backup(cr: &str) -> Self {
         Self(cr.to_string())
     }
+    /// A browse session Job (`kopiur_ops`), named after the Job itself: the Job
+    /// asks for `kopiur_api::creds::browse_session_copy_name` before the copy
+    /// exists, and a session Job name is short enough that capping never
+    /// changes it, so both sides land on the same name.
+    pub fn browse_session(job: &str) -> Self {
+        Self(job.to_string())
+    }
     /// Restore mover of a `Restore` (its populate stage shares the copy).
     pub fn restore(cr: &str) -> Self {
         Self(format!("{cr}-restore"))

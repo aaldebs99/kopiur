@@ -27,8 +27,8 @@ use crate::config;
 use crate::context::Context;
 use crate::metrics::ResourceStores;
 use crate::{
-    cluster_repository, consts, maintenance, repository, repository_replication, restore, snapshot,
-    snapshot_policy, snapshot_replication, snapshot_schedule, watch,
+    browse_session, cluster_repository, consts, maintenance, repository, repository_replication,
+    restore, snapshot, snapshot_policy, snapshot_replication, snapshot_schedule, watch,
 };
 
 /// The watcher config EVERY informer in the process shares — the controller
@@ -882,10 +882,45 @@ pub(crate) async fn spawn_all(
         restores: restore_store.clone(),
     });
 
+    let browse_client = client.clone();
+    let browse_ctx = ctx.clone();
     let crepo_ctrl = async move {
         if let Some((_, fut)) = crepo {
             fut.await;
         }
+    };
+
+    // Browse sessions that load a ClusterRepository's credentials from another
+    // namespace: copy them in, under the gates a backup's projection passes.
+    // Only projected session Jobs are watched, and only where ClusterRepositories
+    // are reconciled at all (a namespaced install has none).
+    let browse_ctrl = async move {
+        if !cluster_wide {
+            return;
+        }
+        let selector = format!(
+            "{}={},{}={}",
+            kopiur_api::consts::SESSION_LABEL,
+            kopiur_api::consts::SESSION_BROWSE,
+            kopiur_api::consts::SESSION_CREDS_LABEL,
+            kopiur_api::consts::SESSION_CREDS_PROJECTED,
+        );
+        Controller::new(
+            Api::<Job>::all(browse_client),
+            cfg.clone().labels(&selector),
+        )
+        .with_config(ctrl_cfg.clone())
+        .run(
+            browse_session::reconcile,
+            browse_session::error_policy,
+            browse_ctx,
+        )
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::debug!(error = %e, "browse session reconcile error");
+            }
+        })
+        .await;
     };
 
     tokio::join!(
@@ -898,5 +933,6 @@ pub(crate) async fn spawn_all(
         maint_ctrl,
         repl_ctrl,
         srepl_ctrl,
+        browse_ctrl,
     );
 }
