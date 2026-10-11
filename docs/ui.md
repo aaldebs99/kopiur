@@ -270,6 +270,32 @@ Reads never start a session. `GET …/tree` on a snapshot with no session answer
 `409` and tells you to start one — creating a pod is a real cost and takes a
 deliberate action.
 
+### Browsing a ClusterRepository from another namespace
+
+The session pod loads the repository's credentials from its own namespace,
+because a pod cannot load a Secret from anywhere else. A `ClusterRepository`
+usually keeps its Secret in the operator's namespace, so for a snapshot in an app
+namespace the session asks for a **copy**, and the operator writes it. The
+console and the person browsing never touch the Secret.
+
+The operator copies it only under the gates a backup's
+[credential projection](movers.md) passes, checked again against the live
+objects:
+
+- the `ClusterRepository` sets `spec.credentialProjection.allowed: true`;
+- the run that took the snapshot opted in, through its `SnapshotPolicy`'s
+  `spec.credentialProjection.enabled: true` (a snapshot taken before that stays
+  unbrowsable this way: browsing never widens what the backup was allowed);
+- the snapshot's namespace is in the repository's `allowedNamespaces`;
+- the chart grants the operator Secret writes
+  (`features.credentialProjection.enabled`).
+
+The copy is named `<session job>-creds-<n>` and belongs to the session Job, so it
+is deleted with the session: when you stop it, when it expires, or with the
+repository. When a gate is closed the console says which, and the session Job
+carries a Warning Event saying the same. If you would rather not copy credentials
+at all, `kubectl kopiur browse --local` reads from your own machine instead.
+
 ## Caps, and what a user sees when they hit one
 
 The console is bounded everywhere it fans out, so one person cannot exhaust it
@@ -294,7 +320,8 @@ quickly.
 
 - **It never reads Secrets.** Its ClusterRole has no `secrets` rule at all. That
   is the point of impersonation: credentials reach a session pod through the
-  Job's environment, never through the console.
+  Job's environment, never through the console. A copy a session needs is
+  written by the operator, never by the console.
 - **It never execs outside a session pod.** `pods/exec` is not in the console's
   own ClusterRole; the exec is performed *as you*, under `kopiur-ui-browse`.
 - **It never creates an Ingress**, in any mode. Your edge is yours.

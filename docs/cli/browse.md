@@ -61,6 +61,8 @@ The session expires on its own after `--session-ttl`, which defaults to **15m**,
 | `--kopia-bin PATH` | Which local kopia to run (`--local` only; default `$KOPIUR_KOPIA_BINARY`, then `kopia` on `PATH`). |
 | `--keep` | (`browse` only) keep the session warm on exit. |
 
+A `ClusterRepository` that keeps its credential Secret in another namespace, usually the operator's, is browsed through a copy the operator writes into the snapshot's namespace for the session's lifetime. It does that only under the gates a backup's projection passes: the repository sets `spec.credentialProjection.allowed: true`, the run that took the snapshot opted in through its policy's `spec.credentialProjection.enabled: true`, and the namespace is in `allowedNamespaces`. Otherwise `browse` says which gate is closed, and `--local` remains the way round it. See [the console's browse docs](../ui.md#browsing-a-clusterrepository-from-another-namespace) for the details, which are the same.
+
 There is deliberately **no `--image` flag**. The session pod runs the exact mover image the operator's controller Deployment is configured with, through `KOPIUR_MOVER_IMAGE`, falling back to the release default. Whatever browses your repository is always what backs it up.
 
 ### The security model
