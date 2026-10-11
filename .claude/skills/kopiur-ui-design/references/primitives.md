@@ -450,7 +450,12 @@ per object, however many reads noticed it (`components/attention.ts`).
 Anatomy: **first line** — chip · kind name / mono name (opens the resource
 drawer) / namespace, and on the right the status pill whose word says what is
 wrong ("Stuck", "Failed", "Never succeeded" — never the object's own phase or
-suspend state) with the relative time it went wrong when known. **Body**, under
+suspend state) with the relative time it went wrong when known: when its
+`Stalled=True` / `Ready=False` condition last changed (the rows' `failingSince`,
+a stalled row's `since`, a doctor finding's `at`), never a last-success time. A
+row with no such instant ("Never verified") is undated. Hovering the time
+(`RowTime`, shared with the activity rows) shows the absolute local instant.
+**Body**, under
 the name — the problem in the operator's own words (`.attention-row__what`) and
 the fix on the finding's FIX plate. The operator's `Fix:` clause is lifted out
 of its message onto the plate. Stripe on the left edge. A failing doctor check
@@ -467,6 +472,9 @@ check" for the kind and the check's title linking to the doctor page.
   </span>
   <span class="attention-row__state">
     <span class="health" data-health="failed"><svg aria-hidden="true" />Stuck</span>
+    <time class="attention-row__at" datetime="2026-10-07T22:41:03Z" title="2026-10-07 22:41:03"
+      >12m ago</time
+    >
   </span>
   <div class="attention-row__body">
     <p class="attention-row__what">blocked on MoverPermitted=False …</p>
