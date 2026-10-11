@@ -298,6 +298,23 @@ describe("attention: dates", () => {
     ]);
   });
 
+  it("keeps the doctor's account but takes a date another source knows", () => {
+    const { items } = attention({
+      checks: [
+        check({
+          check: "repos-ready",
+          objects: [
+            object({ kind: "repository", name: "nas", message: "nas is not Ready", at: null }),
+          ],
+        }),
+      ],
+      repositories: [{ ...repo("nas", "failed"), failingSince: SINCE }],
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]?.problems).toEqual([{ what: "nas is not Ready" }]);
+    expect(items[0]?.at).toBe(SINCE);
+  });
+
   it("leaves a policy that never succeeded undated: nothing went wrong at an instant", () => {
     const { items } = attention({ policies: [policy("app", { lastSuccessfulSnapshot: null })] });
     expect(items[0]?.at).toBeUndefined();

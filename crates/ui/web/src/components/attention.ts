@@ -182,8 +182,15 @@ export function attention(sources: AttentionSources): Attention {
     const k = key(target);
     const existing = entries.get(k);
     const rank = extra.rank ?? rankOf(health);
-    if (existing !== undefined && existing.source < source) return;
+    const at = extra.at ?? existing?.item.at;
+    if (existing !== undefined && existing.source < source) {
+      // The earlier source's account stands, but a date only this one knows
+      // still dates the row: an undated row would sort below every dated one.
+      if (existing.item.at === undefined && at !== undefined) existing.item.at = at;
+      return;
+    }
     if (existing?.source === source) {
+      if (existing.item.at === undefined && at !== undefined) existing.item.at = at;
       if (!existing.item.problems.some((p) => p.what === problem.what)) {
         existing.item.problems.push(problem);
       }
@@ -195,7 +202,7 @@ export function attention(sources: AttentionSources): Attention {
       return;
     }
     const item: AttentionItem = { target, health, state, problems: [problem] };
-    if (extra.at !== undefined && extra.at !== null) item.at = extra.at;
+    if (at !== undefined) item.at = at;
     entries.set(k, { item, source, rank, order: existing?.order ?? entries.size });
   };
 
