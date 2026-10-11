@@ -41,7 +41,7 @@ use kube::api::{Api, ListParams, PostParams};
 use kube::core::CustomResourceExt as KubeCustomResourceExt;
 use serde::Serialize;
 
-use crate::conditions::failing_since;
+use crate::conditions::{failing_since, transition_time};
 use crate::ctx::{OpsCtx, Scope};
 
 /// Every check doctor performs. Closed enum: adding a check forces the runner
@@ -724,7 +724,9 @@ pub fn repos_ready(repos: &[RepoSummary]) -> (Outcome, Vec<ObjectFinding>) {
             Some(GateHit::Known(gate, cond)) => {
                 let detail = describe_gate(gate, cond);
                 let line = format!("{}: {detail}", r.label());
-                objects.push(target.finding(gate.severity.into(), detail));
+                let mut finding = target.finding(gate.severity.into(), detail);
+                finding.at = transition_time(cond);
+                objects.push(finding);
                 match gate.severity {
                     GateSeverity::Fail => fails.push(line),
                     GateSeverity::Warn => warns.push(line),
@@ -742,6 +744,7 @@ pub fn repos_ready(repos: &[RepoSummary]) -> (Outcome, Vec<ObjectFinding>) {
                 warns.push(format!("{}: {detail} — {UPGRADE_PLUGIN_FIX}", r.label()));
                 let mut finding = target.finding(FindingSeverity::Warn, detail);
                 finding.fix = Some(UPGRADE_PLUGIN_FIX.into());
+                finding.at = transition_time(cond);
                 objects.push(finding);
             }
             None => {}
@@ -1098,6 +1101,8 @@ enum StuckKind {
         /// The rendered [`describe_gate`] line — one renderer, so the CLI
         /// cannot describe the same gate two ways in two checks.
         detail: String,
+        /// When the gate's condition tripped.
+        since: Option<DateTime<Utc>>,
     },
     /// Non-terminal for longer than `--stuck-threshold`.
     Overdue,
@@ -1110,6 +1115,8 @@ enum StuckKind {
     UnregisteredGate {
         /// The full description (condition, raw reason, message).
         detail: String,
+        /// When the gate's condition tripped.
+        since: Option<DateTime<Utc>>,
     },
 }
 
@@ -1143,7 +1150,7 @@ impl StuckKind {
             Self::UnknownPhase { phase } => {
                 format!("phase `{phase}` is not one this plugin understands")
             }
-            Self::UnregisteredGate { detail } => detail.clone(),
+            Self::UnregisteredGate { detail, .. } => detail.clone(),
         }
     }
 
@@ -1178,6 +1185,15 @@ impl StuckKind {
             Self::UnknownPhase { .. } | Self::UnregisteredGate { .. } => UPGRADE_PLUGIN_FIX,
         }
     }
+
+    /// When it went wrong: the gate's trip, when a gate holds it. Overdue and
+    /// unreadable work has no such instant — only an age.
+    fn since(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Blocked { since, .. } | Self::UnregisteredGate { since, .. } => *since,
+            Self::Overdue | Self::UnknownPhase { .. } => None,
+        }
+    }
 }
 
 /// Classify one object. **Pure** — every IO-bound caller reduces to this.
@@ -1209,6 +1225,7 @@ fn classify_stuck(
         return Some(StuckKind::Blocked {
             gate,
             detail: describe_gate(gate, cond),
+            since: transition_time(cond),
         });
     }
     if age.is_some_and(|a| a > threshold) {
@@ -1217,6 +1234,7 @@ fn classify_stuck(
     match gate {
         Some(GateHit::Unregistered(cond)) => Some(StuckKind::UnregisteredGate {
             detail: describe_unregistered_gate(cond),
+            since: transition_time(cond),
         }),
         Some(GateHit::Known(..)) | None => None,
     }
@@ -1532,6 +1550,7 @@ pub fn stuck(
                 .target
                 .finding(e.kind.severity().into(), e.kind.detail(&threshold_label));
             finding.fix = Some(e.kind.fix().to_string());
+            finding.at = e.kind.since();
             finding
         })
         .collect();
@@ -2706,6 +2725,18 @@ mod tests {
         );
         assert!(why.contains("never self-heals"), "{why}");
         assert!(fix.contains("operator's own diagnosis"), "{fix}");
+    }
+
+    #[test]
+    fn a_blocked_object_is_dated_by_when_its_gate_tripped() {
+        let w = work(
+            vec![snap_at("Pending", 1, vec![mover_blocked_condition()])],
+            vec![],
+        );
+        let (_, objects) = stuck(&w, std::time::Duration::from_secs(3600), now());
+        assert_eq!(objects.len(), 1);
+        let tripped: DateTime<Utc> = ago(5).parse().unwrap();
+        assert_eq!(objects[0].at, Some(tripped));
     }
 
     #[test]

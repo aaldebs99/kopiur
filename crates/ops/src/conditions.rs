@@ -14,8 +14,13 @@ pub fn failing_since(conditions: &[Condition]) -> Option<DateTime<Utc>> {
             (c.type_ == kopiur_api::consts::STALLED_CONDITION && c.status == "True")
                 || (c.type_ == kopiur_api::consts::READY_CONDITION && c.status == "False")
         })
-        .filter_map(|c| DateTime::from_timestamp(c.last_transition_time.0.as_second(), 0))
+        .filter_map(transition_time)
         .max()
+}
+
+/// When one condition last changed status.
+pub fn transition_time(c: &Condition) -> Option<DateTime<Utc>> {
+    DateTime::from_timestamp(c.last_transition_time.0.as_second(), 0)
 }
 
 #[cfg(test)]
