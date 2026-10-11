@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { formatTimestamp } from "../util/format";
 import { problemBanner } from "../api/problem";
 import type {
   DoctorReportView,
@@ -410,6 +411,28 @@ describe("Overview", () => {
     });
     expect(verdict).toHaveTextContent("1 snapshot failed");
     expect(screen.queryByText("Nothing needs you")).toBeNull();
+  });
+
+  it("puts when an object went wrong beside its pill, and the instant on hover", async () => {
+    const since = "2026-09-08T11:55:00+00:00";
+    mockApi({
+      ...calm(),
+      "/api/v1/status": jsonResponse({
+        now: NOW,
+        report: {
+          ...(status.report as object),
+          stalled: [],
+          inFlight: { snapshots: 0, restores: 0 },
+        },
+      }),
+      "/api/v1/repositories": jsonResponse([repo("cold", "failed", { failingSince: since })]),
+      "/api/v1/doctor": jsonResponse(allGood),
+    });
+    mountApp("/");
+    const list = await screen.findByRole("list", { name: "Objects needing attention" });
+    const time = await within(list).findByText("5m ago");
+    expect(time.tagName).toBe("TIME");
+    expect(time).toHaveAttribute("title", formatTimestamp(since));
   });
 
   it("never says nothing needs you when the policies read was refused, and says it did not load", async () => {
