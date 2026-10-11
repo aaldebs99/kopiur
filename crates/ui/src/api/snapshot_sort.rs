@@ -80,11 +80,66 @@ fn bad_sort(value: &str) -> ApiError {
 }
 
 /// One row's value under a key: text or a number, `None` when the row has
-/// none. Text compares as written; numbers as numbers.
-#[derive(Debug, PartialEq, PartialOrd)]
+/// none. Text compares naturally ([`natural_cmp`]); numbers as numbers.
+#[derive(Debug, PartialEq)]
 enum Value {
     Text(String),
     Number(i64),
+}
+
+impl Value {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Text(a), Self::Text(b)) => natural_cmp(a, b),
+            (Self::Number(a), Self::Number(b)) => a.cmp(b),
+            // One key yields one variant; a mix cannot arise, so order it stably.
+            (Self::Number(_), Self::Text(_)) => Ordering::Less,
+            (Self::Text(_), Self::Number(_)) => Ordering::Greater,
+        }
+    }
+}
+
+/// **Pure.** The order the SPA's other tables use for text (a numeric,
+/// case-insensitive collator): runs of digits compare as numbers, so
+/// `photos-2` comes before `photos-10`, and case only breaks ties.
+fn natural_cmp(a: &str, b: &str) -> Ordering {
+    natural_cmp_folded(a, b).then_with(|| a.cmp(b))
+}
+
+fn natural_cmp_folded(a: &str, b: &str) -> Ordering {
+    let (mut x, mut y) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (x.peek().copied(), y.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(c), Some(d)) if c.is_ascii_digit() && d.is_ascii_digit() => {
+                let order = digit_run(&mut x).cmp(&digit_run(&mut y));
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+            (Some(c), Some(d)) => {
+                let order = c.to_lowercase().cmp(d.to_lowercase());
+                if order != Ordering::Equal {
+                    return order;
+                }
+                x.next();
+                y.next();
+            }
+        }
+    }
+}
+
+/// Consume a run of ASCII digits, as a key that orders by numeric value:
+/// leading zeros dropped, then shorter is smaller, then digit by digit.
+fn digit_run(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> (usize, String) {
+    let mut digits = String::new();
+    while let Some(c) = chars.next_if(char::is_ascii_digit) {
+        digits.push(c);
+    }
+    let significant = digits.trim_start_matches('0').to_string();
+    (significant.len(), significant)
 }
 
 /// **Pure.** Order `rows` by `sort`, stably: rows that tie (or a `None` sort)
@@ -98,7 +153,7 @@ pub fn sort_rows(rows: &mut [SnapshotRow], sort: Option<SnapshotSort>) {
             (None, Some(_)) => Ordering::Greater,
             (Some(_), None) => Ordering::Less,
             (Some(x), Some(y)) => {
-                let order = x.partial_cmp(&y).unwrap_or(Ordering::Equal);
+                let order = x.cmp(&y);
                 if sort.descending {
                     order.reverse()
                 } else {
@@ -260,6 +315,15 @@ mod tests {
             ["old", "new", "open"],
             "a run still going has no duration"
         );
+    }
+
+    #[test]
+    fn text_sorts_naturally_and_ignores_case_as_the_other_tables_do() {
+        let mut rows = vec![row("photos-10"), row("Photos-3"), row("photos-2")];
+        sort_rows(&mut rows, sort("snapshot"));
+        assert_eq!(names(&rows), ["photos-2", "Photos-3", "photos-10"]);
+        sort_rows(&mut rows, sort("-snapshot"));
+        assert_eq!(names(&rows), ["photos-10", "Photos-3", "photos-2"]);
     }
 
     #[test]
