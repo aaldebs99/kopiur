@@ -16,7 +16,7 @@ use kopiur_ui_model::views::ScheduleRow;
 
 use crate::AppState;
 use crate::api::problem::ApiError;
-use crate::api::{NamespaceQuery, UiQuery, client_for};
+use crate::api::{NamespaceQuery, UiQuery, client_for, failing_since};
 use crate::auth::CurrentIdentity;
 
 /// This module's routes, relative to `/api/v1`.
@@ -49,6 +49,11 @@ pub fn schedule_row(s: &SnapshotSchedule) -> ScheduleRow {
             .and_then(|r| r.snapshot_ref.as_ref())
             .map(|s| s.name.clone()),
         consecutive_failures: status.and_then(|st| st.consecutive_failures).unwrap_or(0),
+        failing_since: failing_since(
+            status
+                .map(|st| st.conditions.as_slice())
+                .unwrap_or_default(),
+        ),
     }
 }
 
@@ -132,6 +137,41 @@ status:
         assert_eq!(row.next_fire.as_deref(), Some("2026-09-09T02:17:00Z"));
         assert_eq!(row.last_snapshot.as_deref(), Some("nightly-20260908"));
         assert_eq!(row.consecutive_failures, 1);
+    }
+
+    #[test]
+    fn a_schedule_row_is_dated_by_when_it_went_wrong() {
+        let s: SnapshotSchedule = from_yaml(
+            r#"
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotSchedule
+metadata: { name: nightly-cron, namespace: media }
+spec:
+  policyRef: { name: nightly }
+  schedule: { cron: "H 2 * * *" }
+status:
+  lastSchedule: { at: "2026-09-08T02:17:00Z" }
+  conditions:
+    - { type: Ready, status: "False", reason: Failed, message: broke, lastTransitionTime: "2026-09-08T04:00:00Z" }
+"#,
+        );
+        assert_eq!(
+            schedule_row(&s).failing_since.as_deref(),
+            Some("2026-09-08T04:00:00+00:00")
+        );
+        let ready: SnapshotSchedule = from_yaml(
+            r#"
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotSchedule
+metadata: { name: nightly-cron, namespace: media }
+spec:
+  policyRef: { name: nightly }
+  schedule: { cron: "H 2 * * *" }
+status:
+  lastSchedule: { at: "2026-09-08T02:17:00Z" }
+"#,
+        );
+        assert_eq!(schedule_row(&ready).failing_since, None);
     }
 
     #[test]

@@ -15,8 +15,8 @@ use kopiur_ui_model::views::{ReplicationsView, RepositoryReplicationRow, Snapsho
 use crate::AppState;
 use crate::api::problem::ApiError;
 use crate::api::{
-    NamespaceQuery, UiQuery, client_for, repo_ref_display, repository_replication_phase_view,
-    snapshot_replication_phase_view,
+    NamespaceQuery, UiQuery, client_for, failing_since, repo_ref_display,
+    repository_replication_phase_view, snapshot_replication_phase_view,
 };
 use crate::auth::CurrentIdentity;
 
@@ -44,6 +44,7 @@ pub fn repository_replication_row(r: &RepositoryReplication) -> RepositoryReplic
         next_scheduled_at: status.and_then(|s| s.next_scheduled_at.clone()),
         last_replicated_bytes: status.and_then(|s| s.last_replicated_bytes),
         last_replicated_blobs: status.and_then(|s| s.last_replicated_blobs),
+        failing_since: failing_since(status.map(|s| s.conditions.as_slice()).unwrap_or_default()),
         namespace,
     }
 }
@@ -68,6 +69,7 @@ pub fn snapshot_replication_row(r: &SnapshotReplication) -> SnapshotReplicationR
         already_present: run.and_then(|s| s.already_present),
         failed: run.and_then(|s| s.failed),
         pruned: run.and_then(|s| s.pruned),
+        failing_since: failing_since(status.map(|s| s.conditions.as_slice()).unwrap_or_default()),
         namespace,
     }
 }
@@ -165,6 +167,50 @@ spec:
         assert_eq!(row.destination_backend.as_deref(), Some("Filesystem"));
         assert!(row.suspended);
         assert_eq!(row.phase, None);
+    }
+
+    #[test]
+    fn a_replication_row_is_dated_by_when_it_failed_not_its_last_success() {
+        let r: RepositoryReplication = from_yaml(
+            r#"
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: RepositoryReplication
+metadata: { name: blobsync, namespace: media }
+spec:
+  sourceRef: { kind: Repository, name: nas }
+  destination: { s3: { bucket: dr-bucket } }
+  schedule: { cron: "0 5 * * *" }
+status:
+  phase: Failed
+  lastReplicated: "2026-09-01T05:12:00Z"
+  conditions:
+    - { type: Ready, status: "False", reason: Failed, message: broke, lastTransitionTime: "2026-09-08T04:00:00Z" }
+"#,
+        );
+        assert_eq!(
+            repository_replication_row(&r).failing_since.as_deref(),
+            Some("2026-09-08T04:00:00+00:00")
+        );
+        let s: SnapshotReplication = from_yaml(
+            r#"
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotReplication
+metadata: { name: offsite, namespace: media }
+spec:
+  sourceRef: { kind: Repository, name: nas }
+  destinationRef: { kind: ClusterRepository, name: shared }
+  schedule: { cron: "0 3 * * *" }
+status:
+  phase: Failed
+  lastReplicated: "2026-09-01T03:10:00Z"
+  conditions:
+    - { type: Ready, status: "False", reason: Failed, message: broke, lastTransitionTime: "2026-09-08T04:00:00Z" }
+"#,
+        );
+        assert_eq!(
+            snapshot_replication_row(&s).failing_since.as_deref(),
+            Some("2026-09-08T04:00:00+00:00")
+        );
     }
 
     #[test]

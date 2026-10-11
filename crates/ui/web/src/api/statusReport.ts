@@ -33,6 +33,12 @@ export interface StalledRowView {
    * not its message could be read — and `complete` records the gap.
    */
   message: string | null;
+  /**
+   * When it stalled: the condition's own transition time, or `null` when the
+   * report did not carry one. Optional on the wire — a report without it is
+   * not partial, only undated.
+   */
+  since: string | null;
 }
 
 /** Counts of non-terminal work; `null` when the report did not say. */
@@ -80,7 +86,12 @@ function stalledRow(value: unknown): StalledRowView | null {
   if (kind === null || object === null) {
     return null;
   }
-  return { kind, object, message: optionalString(row.message) };
+  return {
+    kind,
+    object,
+    message: optionalString(row.message),
+    since: optionalString(row.since),
+  };
 }
 
 /**

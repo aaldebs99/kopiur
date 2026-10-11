@@ -354,6 +354,7 @@ mod tests {
                 kind: "Snapshot".to_string(),
                 object: "media/oops".into(),
                 message: "terminal kopia failure".into(),
+                since: None,
             }],
         }
     }

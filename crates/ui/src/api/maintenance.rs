@@ -19,7 +19,9 @@ use kopiur_ui_model::views::{MaintenanceRow, ManualRunView, RunStatusView};
 
 use crate::AppState;
 use crate::api::problem::ApiError;
-use crate::api::{NamespaceQuery, UiQuery, client_for, manual_run_phase_label, repo_ref_display};
+use crate::api::{
+    NamespaceQuery, UiQuery, client_for, failing_since, manual_run_phase_label, repo_ref_display,
+};
 use crate::auth::CurrentIdentity;
 
 /// This module's routes, relative to `/api/v1`.
@@ -43,6 +45,7 @@ pub fn maintenance_row(m: &Maintenance) -> MaintenanceRow {
         manual_run: status
             .and_then(|s| s.manual_run.as_ref())
             .map(manual_run_view),
+        failing_since: failing_since(status.map(|s| s.conditions.as_slice()).unwrap_or_default()),
     }
 }
 
@@ -149,6 +152,29 @@ status:
         assert_eq!(row.full.consecutive_failures, 2);
         assert_eq!(row.full.last_content_reclaimed_bytes, Some(4096));
         assert_eq!(row.manual_run, None);
+    }
+
+    #[test]
+    fn a_maintenance_row_is_dated_by_when_it_went_wrong() {
+        let failing: Maintenance = from_yaml(
+            r#"
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Maintenance
+metadata: { name: mine, namespace: media }
+spec:
+  repository: { kind: Repository, name: nas }
+  schedule: { quick: { cron: "0 * * * *" }, full: { cron: "0 4 * * 0" } }
+  ownership: { owner: kopiur/repository/media/nas }
+status:
+  quick: { consecutiveFailures: 2 }
+  conditions:
+    - { type: Ready, status: "False", reason: Failed, message: broke, lastTransitionTime: "2026-09-08T04:00:00Z" }
+"#,
+        );
+        assert_eq!(
+            maintenance_row(&failing).failing_since.as_deref(),
+            Some("2026-09-08T04:00:00+00:00")
+        );
     }
 
     #[test]

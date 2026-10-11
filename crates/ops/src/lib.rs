@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod browse;
+pub mod conditions;
 pub mod ctx;
 pub mod doctor;
 pub mod error;

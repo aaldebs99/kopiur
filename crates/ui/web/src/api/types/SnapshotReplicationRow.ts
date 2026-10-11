@@ -56,4 +56,10 @@ failed?: number | null,
 /**
  * Snapshots the last run pruned from the destination.
  */
-pruned?: number | null, };
+pruned?: number | null,
+/**
+ * RFC3339 instant its `Stalled=True` or `Ready=False` condition last
+ * changed: when it went wrong, not when it last succeeded. Absent while
+ * neither holds.
+ */
+failingSince?: string | null, };

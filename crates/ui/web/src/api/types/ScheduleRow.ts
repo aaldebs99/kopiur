@@ -47,4 +47,10 @@ lastSnapshot?: string | null,
 /**
  * Failures since the last success; bounded by `failedJobsHistoryLimit`.
  */
-consecutiveFailures: number, };
+consecutiveFailures: number,
+/**
+ * RFC3339 instant its `Stalled=True` or `Ready=False` condition last
+ * changed: when it went wrong, not when it last succeeded. Absent while
+ * neither holds.
+ */
+failingSince?: string | null, };

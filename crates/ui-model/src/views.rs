@@ -210,6 +210,11 @@ pub struct RepositorySummary {
     /// admits. Absent for a namespaced `Repository`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admits: Option<AdmittedNamespacesView>,
+    /// RFC3339 instant its `Stalled=True` or `Ready=False` condition last
+    /// changed: when it went wrong, not when it last succeeded. Absent while
+    /// neither holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing_since: Option<String>,
 }
 
 /// Which namespaces a `ClusterRepository` admits, read from its spec.
@@ -954,6 +959,11 @@ pub struct ScheduleRow {
     pub last_snapshot: Option<String>,
     /// Failures since the last success; bounded by `failedJobsHistoryLimit`.
     pub consecutive_failures: i64,
+    /// RFC3339 instant its `Stalled=True` or `Ready=False` condition last
+    /// changed: when it went wrong, not when it last succeeded. Absent while
+    /// neither holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing_since: Option<String>,
 }
 
 /// One row of the restores table.
@@ -1116,6 +1126,11 @@ pub struct MaintenanceRow {
     /// A manual run the user requested, if one is pending or recent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_run: Option<ManualRunView>,
+    /// RFC3339 instant its `Stalled=True` or `Ready=False` condition last
+    /// changed: when it went wrong, not when it last succeeded. Absent while
+    /// neither holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing_since: Option<String>,
 }
 
 /// One maintenance track's run history.
@@ -1188,6 +1203,11 @@ pub struct RepositoryReplicationRow {
     /// Blobs the last run copied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_replicated_blobs: Option<i64>,
+    /// RFC3339 instant its `Stalled=True` or `Ready=False` condition last
+    /// changed: when it went wrong, not when it last succeeded. Absent while
+    /// neither holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing_since: Option<String>,
 }
 
 /// One row of the snapshot-replications table.
@@ -1228,6 +1248,11 @@ pub struct SnapshotReplicationRow {
     /// Snapshots the last run pruned from the destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pruned: Option<u32>,
+    /// RFC3339 instant its `Stalled=True` or `Ready=False` condition last
+    /// changed: when it went wrong, not when it last succeeded. Absent while
+    /// neither holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing_since: Option<String>,
 }
 
 /// Both replication tables, as `GET /api/v1/replications` answers them.

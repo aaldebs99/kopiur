@@ -220,7 +220,7 @@ export function attention(sources: AttentionSources): Attention {
       row.message !== null && row.message.length > 0
         ? splitFix(row.message)
         : { what: "Stalled; the operator did not say why." };
-    add(Source.Stalled, target, "failed", "Stalled", problem);
+    add(Source.Stalled, target, "failed", "Stalled", problem, { at: row.since });
   }
 
   for (const r of sources.repositories ?? []) {
@@ -231,7 +231,7 @@ export function attention(sources: AttentionSources): Attention {
       r.phase !== undefined && r.phase !== null
         ? `The repository reports phase ${repositoryPhaseLabel(r.phase)}.`
         : "The repository has not reported a status yet.";
-    add(Source.List, repositoryTarget(r), r.health, state, { what });
+    add(Source.List, repositoryTarget(r), r.health, state, { what }, { at: r.failingSince });
   }
   for (const s of sources.schedules ?? []) {
     if (s.suspended || s.consecutiveFailures <= 0) continue;
@@ -241,6 +241,7 @@ export function attention(sources: AttentionSources): Attention {
       "failed",
       "Failing",
       { what: `${plural(s.consecutiveFailures, "run")} in a row failed.` },
+      { at: s.failingSince },
     );
   }
   for (const m of sources.maintenance ?? []) {
@@ -259,6 +260,7 @@ export function attention(sources: AttentionSources): Attention {
       "failed",
       "Failing",
       { what },
+      { at: m.failingSince },
     );
   }
   for (const r of sources.replications?.repository ?? []) {
@@ -269,9 +271,11 @@ export function attention(sources: AttentionSources): Attention {
       { kind: "repositoryReplication", namespace: r.namespace, name: r.name },
       "failed",
       "Failed",
-      // Undated: `lastReplicated` is the last copy that succeeded, which a
-      // later failure leaves unchanged, so it would make a new failure look old.
       { what: `The last copy from ${r.source} to ${to} failed.` },
+      // Dated by when it failed, never by `lastReplicated`: that is the last
+      // copy that succeeded, which a later failure leaves unchanged, so it
+      // would make a new failure look old.
+      { at: r.failingSince },
     );
   }
   for (const r of sources.replications?.snapshot ?? []) {
@@ -282,6 +286,7 @@ export function attention(sources: AttentionSources): Attention {
       "failed",
       "Failed",
       { what: `The last copy from ${r.source} to ${r.destination} failed.` },
+      { at: r.failingSince },
     );
   }
   for (const p of sources.policies ?? []) {

@@ -39,7 +39,7 @@ use crate::api::problem::{ApiError, problem};
 use crate::api::schedules::{fires_policy, schedule_row};
 use crate::api::{
     NamespaceQuery, RepositoryKindPath, UiPath, UiQuery, client_for, conditions_view,
-    covering_maintenances, gate_hits, ops_ctx, repo_phase_view,
+    covering_maintenances, failing_since, gate_hits, ops_ctx, repo_phase_view,
 };
 use crate::auth::CurrentIdentity;
 use crate::browse::session_pool::session_expiry;
@@ -69,6 +69,7 @@ struct RepoFacts<'a> {
     last_observed_at: Option<String>,
     server_endpoint: Option<String>,
     admits: Option<AdmittedNamespacesView>,
+    failing_since: Option<String>,
 }
 
 /// **Pure.** `spec.mode` as the string every other kopiur front end prints.
@@ -121,6 +122,7 @@ fn summary_from(facts: &RepoFacts<'_>, gates: &[GateHit]) -> RepositorySummary {
         last_observed_at: facts.last_observed_at.clone(),
         server_endpoint: facts.server_endpoint.clone(),
         admits: facts.admits.clone(),
+        failing_since: facts.failing_since.clone(),
     }
 }
 
@@ -148,6 +150,7 @@ pub fn view_repository(repo: &Repository) -> RepositorySummary {
             .and_then(|s| s.server.as_ref())
             .and_then(|s| s.endpoint.clone()),
         admits: None,
+        failing_since: failing_since(conditions),
     };
     summary_from(&facts, &gate_hits(conditions, GateScope::covers_repository))
 }
@@ -176,6 +179,7 @@ pub fn view_cluster_repository(repo: &ClusterRepository) -> RepositorySummary {
             .and_then(|s| s.server.as_ref())
             .and_then(|s| s.endpoint.clone()),
         admits: Some(admits(&repo.spec.allowed_namespaces)),
+        failing_since: failing_since(conditions),
     };
     summary_from(&facts, &gate_hits(conditions, GateScope::covers_repository))
 }
@@ -643,6 +647,52 @@ status:
     lastObservedAt: "2026-09-08T01:00:00Z"
 "#,
         )
+    }
+
+    #[test]
+    fn a_repository_row_is_dated_by_when_it_went_wrong() {
+        assert_eq!(
+            view_repository(&nas()).failing_since,
+            None,
+            "a Ready repository is undated"
+        );
+        let failing: Repository = from_yaml(
+            r#"
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Repository
+metadata: { name: nas, namespace: media }
+spec:
+  backend: { s3: { bucket: backups, prefix: nas/ } }
+  encryption: { passwordSecretRef: { name: pw, key: password } }
+status:
+  phase: Failed
+  conditions:
+    - { type: Ready, status: "False", reason: Failed, message: broke, lastTransitionTime: "2026-09-08T04:00:00Z" }
+"#,
+        );
+        assert_eq!(
+            view_repository(&failing).failing_since.as_deref(),
+            Some("2026-09-08T04:00:00+00:00")
+        );
+        let cluster: ClusterRepository = from_yaml(
+            r#"
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: ClusterRepository
+metadata: { name: shared }
+spec:
+  backend: { s3: { bucket: backups, prefix: shared/ } }
+  encryption: { passwordSecretRef: { name: pw, key: password, namespace: kopiur } }
+  allowedNamespaces: { all: true }
+status:
+  phase: Failed
+  conditions:
+    - { type: Ready, status: "False", reason: Failed, message: broke, lastTransitionTime: "2026-09-08T04:00:00Z" }
+"#,
+        );
+        assert_eq!(
+            view_cluster_repository(&cluster).failing_since.as_deref(),
+            Some("2026-09-08T04:00:00+00:00")
+        );
     }
 
     #[test]

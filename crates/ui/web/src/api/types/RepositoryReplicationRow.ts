@@ -48,4 +48,10 @@ lastReplicatedBytes?: number | null,
 /**
  * Blobs the last run copied.
  */
-lastReplicatedBlobs?: number | null, };
+lastReplicatedBlobs?: number | null,
+/**
+ * RFC3339 instant its `Stalled=True` or `Ready=False` condition last
+ * changed: when it went wrong, not when it last succeeded. Absent while
+ * neither holds.
+ */
+failingSince?: string | null, };

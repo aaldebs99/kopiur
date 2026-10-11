@@ -182,6 +182,9 @@ pub struct StalledRow {
     pub object: String,
     /// The Stalled condition's message.
     pub message: String,
+    /// RFC3339 instant the Stalled condition last changed: when it stalled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
 }
 
 /// Everything one `status` pass reads from the cluster, before any
@@ -642,6 +645,7 @@ pub fn build_report(inputs: &StatusInputs, repo_filter: Option<&RepoFilter>) -> 
                     policy.name_any()
                 ),
                 message: c.message.clone(),
+                since: crate::snapshots::meta_time(&c.last_transition_time).map(|t| t.to_rfc3339()),
             });
         }
     }
@@ -704,6 +708,7 @@ pub fn build_report(inputs: &StatusInputs, repo_filter: Option<&RepoFilter>) -> 
                     r.name_any()
                 ),
                 message: c.message.clone(),
+                since: crate::snapshots::meta_time(&c.last_transition_time).map(|t| t.to_rfc3339()),
             });
         }
         report
@@ -738,6 +743,7 @@ pub fn build_report(inputs: &StatusInputs, repo_filter: Option<&RepoFilter>) -> 
                     snap.name_any()
                 ),
                 message: c.message.clone(),
+                since: crate::snapshots::meta_time(&c.last_transition_time).map(|t| t.to_rfc3339()),
             });
         }
     }
@@ -763,6 +769,7 @@ pub fn build_report(inputs: &StatusInputs, repo_filter: Option<&RepoFilter>) -> 
                     restore.name_any()
                 ),
                 message: c.message.clone(),
+                since: crate::snapshots::meta_time(&c.last_transition_time).map(|t| t.to_rfc3339()),
             });
         }
     }
@@ -810,6 +817,34 @@ status: { phase: Running }
         assert_eq!(report.repositories.len(), 1);
         assert_eq!(report.in_flight.snapshots, 1);
         assert!(report.snapshot_replications.is_empty());
+    }
+
+    /// A stalled row is dated by its own `Stalled` condition: when it went
+    /// wrong, not when the object was made.
+    #[test]
+    fn a_stalled_row_carries_when_it_stalled() {
+        let snap: Snapshot = from_yaml(
+            r#"
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: Snapshot
+metadata: { name: s1, namespace: default }
+spec: { policyRef: { name: nightly } }
+status:
+  phase: Failed
+  conditions:
+    - { type: Stalled, status: "True", reason: Terminal, message: kopia failed, lastTransitionTime: "2026-06-11T12:00:00Z" }
+"#,
+        );
+        let inputs = StatusInputs {
+            snapshots: vec![snap],
+            ..StatusInputs::default()
+        };
+        let report = build_report(&inputs, None);
+        assert_eq!(report.stalled.len(), 1);
+        assert_eq!(
+            report.stalled[0].since.as_deref(),
+            Some("2026-06-11T12:00:00+00:00")
+        );
     }
 
     /// The `--repository` filter reaches every section at once: a repository
