@@ -23,6 +23,15 @@ describe("whole-row links", () => {
     expect(body((s) => s.includes(":not(.row-link)"))).toMatch(/z-index:\s*1/);
   });
 
+  it("keep an overview time above the cover, so hovering it shows the instant", () => {
+    for (const row of [".attention-row", ".activity-row"]) {
+      const lifted = rules.filter(
+        (r) => r.selector.includes(row) && r.selector.includes("time[title]"),
+      );
+      expect(lifted.map((r) => r.body).join("\n"), row).toMatch(/z-index:\s*1/);
+    }
+  });
+
   it("drop the underline on the row's name — the whole row is the link", () => {
     expect(body((s) => s === ".row-link")).toMatch(/text-decoration:\s*none/);
   });
