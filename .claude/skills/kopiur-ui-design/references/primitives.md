@@ -577,9 +577,37 @@ first cell; related objects as references; numbers right-aligned.
 }
 ```
 
-Rows stay in server order unless the page offers sorting. A wide table scrolls
+Rows arrive in the server's order (namespace, then name; snapshots newest
+first) until someone sorts them. A wide table scrolls
 inside `.ledger-scroll` rather than starving a column. Long names wrap at `/` and `-`
 (`overflow-wrap: anywhere` on `code`), never ellipsised in a table.
+
+### Sorting
+
+A column sorts only where an order means something: it declares `sort` on its
+`ColumnSpec` (in `components/listColumns.ts`, one list per table), and its table
+gives `ColumnLedger` a `sortValue` switch beside `cell`. Never on a list of
+references ("Writes into", "Applies to"), prose (a doctor finding), a cron line,
+a summary of the last run, or a column of buttons; `tableSorting.test.ts` pins
+each table's set. The kind sets the first click: `text` A to Z (natural, so
+`photos-2` before `photos-10`, case ignored), `number` largest first, `time`
+newest first, `state` worst first (the lamp's place in `HEALTH_ORDER`). The
+second click reverses it, the third lets go, back to the server's order. A row
+with no value sits last whichever way the column runs, and ties keep the
+server's order. An object column sorts by name, then namespace.
+
+The header's words become a quiet button ("Sort by Size"; its title says what
+the next click does), the `th` carries `aria-sort`, and the arrow sits in the
+header's leading padding so it takes no width from a narrow column: lit on the
+sorted column, shown on the others only on hover or focus. The resize handle is
+a sibling, so a drag never sorts.
+
+The order is the page's `?sort=` (the column id, `-` in front for descending;
+one table per page): it can be shared, Back undoes it, and a change drops
+`offset`. Snapshots is the one list the server pages, so the server sorts it
+(`?sort=` on `GET /api/v1/snapshots`, `api/snapshot_sort.rs`) before it pages,
+and the table only draws the header state (`serverSorted`); the filters and the
+pager keep the sort.
 
 ### Columns a person can change
 
