@@ -40,4 +40,10 @@ full: RunStatusView,
 /**
  * A manual run the user requested, if one is pending or recent.
  */
-manualRun?: ManualRunView | null, };
+manualRun?: ManualRunView | null,
+/**
+ * RFC3339 instant its `Stalled=True` or `Ready=False` condition last
+ * changed: when it went wrong, not when it last succeeded. Absent while
+ * neither holds.
+ */
+failingSince?: string | null, };

@@ -54,8 +54,8 @@ describe("narrowStatusReport", () => {
     expect(report.schedules).toBe(1);
     expect(report.inFlight).toEqual({ snapshots: 2, restores: 1 });
     expect(report.stalled).toEqual([
-      { kind: "Snapshot", object: "media/nightly-1", message: "MoverPermitted=False" },
-      { kind: "Restore", object: "media/r1", message: "credentials missing" },
+      { kind: "Snapshot", object: "media/nightly-1", message: "MoverPermitted=False", since: null },
+      { kind: "Restore", object: "media/r1", message: "credentials missing", since: null },
     ]);
     expect(report.complete).toBe(true);
   });
@@ -103,8 +103,8 @@ describe("narrowStatusReport", () => {
     // message is `null`, not `""`. An empty string reads as "the operator
     // said nothing", which is a claim this bundle is in no position to make.
     expect(report.stalled).toEqual([
-      { kind: "Snapshot", object: "a/b", message: null },
-      { kind: "Snapshot", object: "c/d", message: "m" },
+      { kind: "Snapshot", object: "a/b", message: null, since: null },
+      { kind: "Snapshot", object: "c/d", message: "m", since: null },
     ]);
     expect(report.complete).toBe(false);
   });
@@ -117,7 +117,23 @@ describe("narrowStatusReport", () => {
       ...full,
       stalled: [{ kind: "Snapshot", object: "a/b" }],
     });
-    expect(report.stalled).toEqual([{ kind: "Snapshot", object: "a/b", message: null }]);
+    expect(report.stalled).toEqual([
+      { kind: "Snapshot", object: "a/b", message: null, since: null },
+    ]);
     expect(report.complete).toBe(false);
+  });
+
+  it("dates a stalled row by when it stalled, and an undated row is still complete", () => {
+    const report = narrowStatusReport({
+      ...full,
+      stalled: [
+        { kind: "Snapshot", object: "a/b", message: "m", since: "2026-09-08T11:00:00+00:00" },
+        { kind: "Snapshot", object: "c/d", message: "m", since: 7 },
+        { kind: "Snapshot", object: "e/f", message: "m" },
+      ],
+    });
+    expect(report.stalled.map((r) => r.since)).toEqual(["2026-09-08T11:00:00+00:00", null, null]);
+    // The date is optional: a report from before it existed is not partial.
+    expect(report.complete).toBe(true);
   });
 });

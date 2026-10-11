@@ -94,4 +94,10 @@ serverEndpoint?: string | null,
  * For `ClusterRepository`: which namespaces `spec.allowedNamespaces`
  * admits. Absent for a namespaced `Repository`.
  */
-admits?: AdmittedNamespacesView | null, };
+admits?: AdmittedNamespacesView | null,
+/**
+ * RFC3339 instant its `Stalled=True` or `Ready=False` condition last
+ * changed: when it went wrong, not when it last succeeded. Absent while
+ * neither holds.
+ */
+failingSince?: string | null, };

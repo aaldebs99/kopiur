@@ -41,6 +41,7 @@ use kube::api::{Api, ListParams, PostParams};
 use kube::core::CustomResourceExt as KubeCustomResourceExt;
 use serde::Serialize;
 
+use crate::conditions::failing_since;
 use crate::ctx::{OpsCtx, Scope};
 
 /// Every check doctor performs. Closed enum: adding a check forces the runner
@@ -1563,20 +1564,11 @@ struct FailureEntry {
     explained_by_warn_gate: bool,
 }
 
-/// When a terminal object recorded its failure: the newest transition time
-/// among the kstatus failure markers (`Stalled=True`, `Ready=False` — what
-/// `io::set_ready` writes at the terminal transition), falling back to
+/// When a terminal object recorded its failure: [`failing_since`] — the newest
+/// transition among the kstatus failure markers — falling back to
 /// `creationTimestamp`. There is no `completionTime` on these kinds.
 fn failed_at(conditions: &[Condition], meta: &kube::core::ObjectMeta) -> Option<DateTime<Utc>> {
-    let from_conditions = conditions
-        .iter()
-        .filter(|c| {
-            (c.type_ == kopiur_api::consts::STALLED_CONDITION && c.status == "True")
-                || (c.type_ == kopiur_api::consts::READY_CONDITION && c.status == "False")
-        })
-        .filter_map(|c| DateTime::from_timestamp(c.last_transition_time.0.as_second(), 0))
-        .max();
-    from_conditions.or_else(|| {
+    failing_since(conditions).or_else(|| {
         meta.creation_timestamp
             .as_ref()
             .and_then(|t| DateTime::from_timestamp(t.0.as_second(), 0))
