@@ -21,7 +21,8 @@ The first screen. Answers "is my data safe?" in this order:
    share is remembered. When the pane is too narrow for both (each keeps 440px),
    they stack, **Needs attention first**, and the grip goes.
    - **Needs attention · N** (start) — one list of attention rows
-     (`primitives.md`), worst first: every object that needs someone exactly
+     (`primitives.md`), most recent first (as Recent activity reads), then the
+     rows nothing dates, worst first: every object that needs someone exactly
      once, whether the doctor named it, the status report lists it as stalled, or
      its kind's list shows it unhealthy — the doctor's account wins, then the
      stalled message, then what the list row says. Failing doctor checks about no

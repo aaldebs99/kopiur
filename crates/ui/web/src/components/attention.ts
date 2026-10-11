@@ -17,7 +17,8 @@ import { repositoryPhaseLabel } from "./repository";
 /**
  * What the overview's "Needs attention" lists: one row per object that needs
  * someone, whichever read noticed it, and one line per failing doctor check
- * that is not about any object in particular.
+ * that is not about any object in particular. Most recent first, as the
+ * activity beside it reads; rows no source could date follow, worst first.
  *
  * Three reads can say the same object is in trouble: the doctor names it, the
  * status report lists it as stalled, and its kind's list shows it unhealthy.
@@ -52,7 +53,7 @@ export interface AttentionCheck {
 }
 
 export interface Attention {
-  /** Every object that needs someone, worst first — none held back. */
+  /** Every object that needs someone, most recent first, undated worst first — none held back. */
   items: AttentionItem[];
   checks: AttentionCheck[];
 }
@@ -124,6 +125,16 @@ interface Entry {
   source: Source;
   rank: number;
   order: number;
+}
+
+/** Newer before older, and anything dated before anything that is not. */
+function byRecency(a: Entry, b: Entry): number {
+  const at = (e: Entry) => (e.item.at === undefined ? Number.NaN : Date.parse(e.item.at));
+  const x = at(a);
+  const y = at(b);
+  if (Number.isNaN(x) || Number.isNaN(y))
+    return Number.isNaN(x) === Number.isNaN(y) ? 0 : Number.isNaN(x) ? 1 : -1;
+  return y - x;
 }
 
 function key(target: InspectTarget): string {
@@ -308,8 +319,10 @@ export function attention(sources: AttentionSources): Attention {
     }
   }
 
+  // Most recent first, as the activity beside it reads; what no source could
+  // date follows, worst first.
   const sorted = [...entries.values()]
-    .sort((a, b) => a.rank - b.rank || a.order - b.order)
+    .sort((a, b) => byRecency(a, b) || a.rank - b.rank || a.order - b.order)
     .map((e) => e.item);
   return {
     items: sorted,

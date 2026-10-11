@@ -278,6 +278,26 @@ describe("attention: dates", () => {
     expect(items.map((i) => i.at)).toEqual(Array(6).fill(SINCE));
   });
 
+  it("puts the most recent first, then what has no date, worst first", () => {
+    const at = (iso: string) => ({ ...repo("x", "failed"), failingSince: iso });
+    const { items } = attention({
+      repositories: [
+        { ...at("2026-09-08T09:00:00Z"), name: "oldest" },
+        { ...repo("undated-degraded", "degraded") },
+        { ...at("2026-09-08T11:30:00Z"), name: "newest", health: "degraded" },
+        { ...repo("undated-failed", "failed") },
+        { ...at("2026-09-08T10:00:00Z"), name: "middle" },
+      ],
+    });
+    expect(items.map((i) => i.target.name)).toEqual([
+      "newest",
+      "middle",
+      "oldest",
+      "undated-failed",
+      "undated-degraded",
+    ]);
+  });
+
   it("leaves a policy that never succeeded undated: nothing went wrong at an instant", () => {
     const { items } = attention({ policies: [policy("app", { lastSuccessfulSnapshot: null })] });
     expect(items[0]?.at).toBeUndefined();
