@@ -24,7 +24,15 @@
 //!   backup was allowed;
 //! * the namespace is one the `ClusterRepository`'s `allowedNamespaces` admits.
 //!
-//! A closed gate is a Warning Event on the Job, and nothing is copied.
+//! A closed gate is a Warning Event on the Job, and nothing is copied. The
+//! reason also goes on the Job itself, as the
+//! [`SESSION_CREDS_REFUSED_ANNOTATION`]: the person browsing can read a Job but
+//! not its Events, and the session's wait reports it from there. A projection
+//! that fails for a reason the user must fix (the operator's Secret RBAC, a
+//! missing source) is written there too; a passing apiserver error is not, so
+//! the wait keeps waiting through the retry. Nothing the gates read is watched,
+//! so a refusal re-checks every [`REFUSAL_RECHECK`] while the session lives, and
+//! fixing the gate lets the waiting pod start.
 //!
 //! Each copy is owned by the session Job, in the same namespace, so it goes
 //! when the Job does: when the session is ended, at its TTL, or with the
@@ -42,12 +50,12 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 
 use kopiur_api::common::RepositoryKind;
-use kopiur_api::consts::SESSION_SNAPSHOT_ANNOTATION;
+use kopiur_api::consts::{SESSION_CREDS_REFUSED_ANNOTATION, SESSION_SNAPSHOT_ANNOTATION};
 use kopiur_api::creds::{CredsSecretRef, mover_creds_secret_refs};
 use kopiur_api::{ClusterRepository, Snapshot, validate};
 
 use crate::context::Context;
-use crate::error::{Result, error_policy_for};
+use crate::error::{Error, Result, error_policy_for};
 use crate::io::{self, CredsContext, CredsPrefix};
 
 /// Why a session Job gets no copies. Each names what to change.
@@ -250,6 +258,50 @@ pub fn copy_owner(job: &Job) -> OwnerReference {
     }
 }
 
+/// How soon a refused session is checked again. A session lives minutes, and
+/// someone who just fixed a gate is waiting on it.
+pub const REFUSAL_RECHECK: std::time::Duration =
+    std::time::Duration::from_secs(kopiur_api::consts::SESSION_CREDS_RECHECK_SECS);
+
+/// **Pure.** What to do after a refusal: look again soon, since fixing a gate
+/// changes objects this controller does not watch.
+pub fn after_refusal() -> Action {
+    Action::requeue(REFUSAL_RECHECK)
+}
+
+/// **Pure.** The merge patch that makes the Job's refusal annotation say
+/// `want` (`None` removes it), or `None` when it already does.
+pub fn refusal_patch(job: &Job, want: Option<&str>) -> Option<serde_json::Value> {
+    let current = job
+        .annotations()
+        .get(SESSION_CREDS_REFUSED_ANNOTATION)
+        .map(String::as_str);
+    (current != want).then(|| {
+        serde_json::json!({
+            "metadata": { "annotations": { SESSION_CREDS_REFUSED_ANNOTATION: want } }
+        })
+    })
+}
+
+/// Bring the refusal annotation to `want`. Best-effort: the Event says the same,
+/// and a session that cannot see it still ends at its readiness deadline.
+async fn record_refusal(job: &Job, want: Option<&str>, ctx: &Context) {
+    let Some(patch) = refusal_patch(job, want) else {
+        return;
+    };
+    let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), &job.namespace().unwrap_or_default());
+    if let Err(e) = jobs
+        .patch(
+            &job.name_any(),
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(patch),
+        )
+        .await
+    {
+        tracing::warn!(error = %e, job = %job.name_any(), "could not record the session's refusal");
+    }
+}
+
 /// Reconcile one projected browse session Job: copy its credentials in when
 /// every gate holds, say why on the Job when one does not.
 pub async fn reconcile(job: Arc<Job>, ctx: Arc<Context>) -> Result<Action> {
@@ -267,20 +319,32 @@ async fn reconcile_inner(job: &Job, ctx: &Context) -> Result<Action> {
     let namespace = job.namespace().unwrap_or_default();
     match plan(job, &namespace, ctx).await? {
         Ok((repository, refs)) => {
-            project(job, &namespace, &repository, &refs, ctx).await?;
+            match project(job, &namespace, &repository, &refs, ctx).await {
+                Ok(()) => record_refusal(job, None, ctx).await,
+                // Something the user must change (the operator's Secret RBAC, a
+                // missing source): say so on the Job, then retry as usual.
+                Err(Error::MissingDependency(why)) => {
+                    record_refusal(job, Some(&why), ctx).await;
+                    return Err(Error::MissingDependency(why));
+                }
+                Err(e) => return Err(e),
+            }
+            Ok(Action::await_change())
         }
         Err(refusal) => {
+            let message = refusal.message();
             io::publish_warning_event(
                 ctx,
                 job,
                 "CredentialsNotProjected",
                 "ProjectCredentials",
-                &refusal.message(),
+                &message,
             )
             .await;
+            record_refusal(job, Some(&message), ctx).await;
+            Ok(after_refusal())
         }
     }
-    Ok(Action::await_change())
 }
 
 /// Fetch what the gates read and decide. The outer `Result` is the apiserver;
@@ -561,6 +625,40 @@ mod tests {
                 kopiur_api::creds::browse_session_copy_name(&longest, idx)
             );
         }
+    }
+
+    #[test]
+    fn the_refusal_on_the_job_is_written_only_when_it_changes() {
+        let mut j = job(annotated(), REPO_UID);
+        let set = refusal_patch(&j, Some("no")).expect("an absent reason is written");
+        assert_eq!(
+            set["metadata"]["annotations"][SESSION_CREDS_REFUSED_ANNOTATION],
+            "no"
+        );
+        j.metadata
+            .annotations
+            .get_or_insert_with(Default::default)
+            .insert(SESSION_CREDS_REFUSED_ANNOTATION.into(), "no".into());
+        assert_eq!(
+            refusal_patch(&j, Some("no")),
+            None,
+            "the same reason is left alone"
+        );
+        let cleared = refusal_patch(&j, None).expect("a stale reason is cleared");
+        assert!(cleared["metadata"]["annotations"][SESSION_CREDS_REFUSED_ANNOTATION].is_null());
+        assert_eq!(
+            refusal_patch(&job(annotated(), REPO_UID), None),
+            None,
+            "nothing to clear"
+        );
+    }
+
+    #[test]
+    fn a_refused_session_is_checked_again_so_fixing_a_gate_lets_it_start() {
+        // Nothing the gates read is watched; a refusal re-checks on a timer
+        // while the session lives, so allowing it lets the waiting pod start.
+        assert_eq!(after_refusal(), Action::requeue(REFUSAL_RECHECK));
+        assert!(REFUSAL_RECHECK <= std::time::Duration::from_secs(30));
     }
 
     #[test]
