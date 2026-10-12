@@ -18,8 +18,8 @@ use tokio::io::AsyncReadExt;
 
 use kopiur_api::common::{MoverDefaults, RepositoryKind};
 use kopiur_api::consts::{
-    SESSION_BROWSE, SESSION_CREDS_LABEL, SESSION_CREDS_PROJECTED, SESSION_LABEL,
-    SESSION_REPO_LABEL, SESSION_SNAPSHOT_ANNOTATION,
+    SESSION_BROWSE, SESSION_CREDS_LABEL, SESSION_CREDS_PROJECTED, SESSION_CREDS_REFUSED_ANNOTATION,
+    SESSION_LABEL, SESSION_REPO_LABEL, SESSION_SNAPSHOT_ANNOTATION,
 };
 use kopiur_kopia::SessionCmd;
 use kopiur_mover::jobs::{self, JobLimits, MoverJobInputs, VolumeMountSpec};
@@ -318,6 +318,11 @@ impl ExecSession {
             target.repo.namespace.as_deref(),
             &target.repo.name,
         );
+        // Sessions are shared per repository, so this snapshot may join one
+        // another snapshot started. Its own credential gates still apply: a
+        // snapshot whose run never opted into projection is refused here, not
+        // let in through a session whose copy someone else's snapshot earned.
+        session_creds(target, &expected_name)?;
         let existing = jobs_api
             .list(&ListParams::default().labels(&selector))
             .await
@@ -328,22 +333,28 @@ impl ExecSession {
             // names can share it — the deterministic NAME disambiguates.
             .find(|j| j.metadata.name.as_deref() == Some(expected_name.as_str()));
 
-        let job_name = match existing {
+        // `created`: whether this call made the Job, so anything the operator
+        // later records on it is about this session (see `stuck_verdict`).
+        let (job_name, created) = match existing {
             Some(job) if !job_is_terminal(&job) => {
                 progress.reusing(&job.name_any());
-                job.name_any()
+                (job.name_any(), false)
             }
             Some(job) => {
                 // A finished/expired session under the deterministic name: replace it.
                 let name = job.name_any();
                 let _ = jobs_api.delete(&name, &DeleteParams::background()).await;
                 wait_job_gone(&jobs_api, &name).await?;
-                create_session_job(ctx, target, ttl, &labels, image, progress).await?
+                let name = create_session_job(ctx, target, ttl, &labels, image, progress).await?;
+                (name, true)
             }
-            None => create_session_job(ctx, target, ttl, &labels, image, progress).await?,
+            None => {
+                let name = create_session_job(ctx, target, ttl, &labels, image, progress).await?;
+                (name, true)
+            }
         };
 
-        let pod = wait_pod_ready(&ctx.client, &ns, &job_name, progress).await?;
+        let pod = wait_pod_ready(&ctx.client, &ns, &job_name, created, progress).await?;
         Ok(ExecSession {
             client: ctx.client.clone(),
             namespace: ns,
@@ -684,35 +695,65 @@ async fn wait_pod_ready(
     client: &kube::Client,
     namespace: &str,
     job_name: &str,
+    created: bool,
     progress: &dyn SessionProgress,
 ) -> Result<String, OpsError> {
     let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
     let selector = format!("{JOB_NAME_LABEL}={job_name}");
     let started = std::time::Instant::now();
     let deadline = started + READY_WAIT;
+    // The Secret the pod was last seen waiting on, so a deadline reached while
+    // waiting on the operator's copy says so rather than "timed out".
+    let mut stuck_on: Option<String> = None;
     progress.waiting(job_name);
     let result = loop {
         if std::time::Instant::now() > deadline {
-            break Err(OpsError::SessionNotReady {
-                job: job_name.to_string(),
-                after: format!("{}s", READY_WAIT.as_secs()),
+            break Err(match stuck_on.as_deref() {
+                Some(secret) => stuck_on_secret(job_name, namespace, secret),
+                None => OpsError::SessionNotReady {
+                    job: job_name.to_string(),
+                    after: format!("{}s", READY_WAIT.as_secs()),
+                },
             });
         }
+        // The Job itself, each round: its uid picks out this session's pods,
+        // and the operator records a refusal on it. A failed read is neither:
+        // no pod matches, and the deadline still ends the wait.
+        let job = jobs.get_opt(job_name).await.ok().flatten();
+        let uid = job.as_ref().and_then(|j| j.uid()).unwrap_or_default();
+        let refusal = job.as_ref().and_then(|j| {
+            j.annotations()
+                .get(SESSION_CREDS_REFUSED_ANNOTATION)
+                .cloned()
+        });
         let list = pods
             .list(&ListParams::default().labels(&selector))
             .await
             .map_err(|e| classify_kube("list", "Pod", "pods", Some(namespace), None, e));
-        let list = match list {
-            Ok(l) => l.items,
+        let list: Vec<Pod> = match list {
+            Ok(l) => l
+                .items
+                .into_iter()
+                .filter(|p| is_session_pod(p, &uid))
+                .collect(),
             Err(e) => break Err(e),
         };
         if let Some(pod) = list.iter().find(|p| pod_is_ready(p)) {
             break Ok(pod.name_any());
         }
-        if started.elapsed() > MISSING_SECRET_GRACE
-            && let Some(secret) = list.iter().find_map(missing_secret)
-        {
-            break Err(stuck_on_secret(job_name, namespace, &secret));
+        if let Some(secret) = list.iter().find_map(missing_secret) {
+            if let Some(stop) = stuck_verdict(
+                job_name,
+                namespace,
+                &secret,
+                refusal.as_deref(),
+                created,
+                started.elapsed(),
+            ) {
+                break Err(stop);
+            }
+            stuck_on = Some(secret);
         }
         if let Some(failed) = list.iter().find(|p| pod_phase(p) == Some("Failed")) {
             let tail = pod_log_tail(&pods, &failed.name_any()).await;
@@ -729,10 +770,11 @@ async fn wait_pod_ready(
     result
 }
 
-/// How long a session pod may wait on a missing credential Secret before the
-/// wait gives up on it. The operator writes a projected copy within a second or
-/// two of the Job appearing; a pod still waiting after this is not going to get
-/// one.
+/// How long a session pod may wait on a missing Secret of its own namespace
+/// before the wait gives up on it: nothing will create that one but a person.
+/// A missing *copy* is waited out for the whole readiness budget instead, since
+/// the operator may be a retry away from writing it, unless it has said it
+/// will not ([`stuck_verdict`]).
 const MISSING_SECRET_GRACE: Duration = Duration::from_secs(30);
 
 /// The credential Secret a pod is waiting for, when the kubelet cannot start it
@@ -754,6 +796,54 @@ fn missing_secret(pod: &Pod) -> Option<String> {
                 .starts_with("not found")
                 .then(|| name.to_string())
         })
+}
+
+/// How long a refusal found on a reused session may be stale: the operator's
+/// re-check interval, plus a little for the write to land.
+const STALE_REFUSAL: Duration =
+    Duration::from_secs(kopiur_api::consts::SESSION_CREDS_RECHECK_SECS + 5);
+
+/// **Pure.** Whether `pod` belongs to this session: owned by the Job with
+/// `job_uid`, and not on its way out. A session Job's name is reused, so the
+/// previous session's pod can still be terminating under the same `job-name`
+/// label, holding credentials this session was never given.
+fn is_session_pod(pod: &Pod, job_uid: &str) -> bool {
+    pod.metadata.deletion_timestamp.is_none()
+        && pod
+            .owner_references()
+            .iter()
+            .any(|o| o.kind == "Job" && o.uid == job_uid)
+}
+
+/// **Pure.** Whether a session pod stuck on `secret` after `waited` should end
+/// the wait, and with what. A missing copy (`{job}-creds-*`) ends it only when
+/// the operator recorded a refusal on the Job; otherwise the operator may still
+/// write it, and the wait goes on. A missing Secret of the namespace itself ends
+/// it after [`MISSING_SECRET_GRACE`].
+///
+/// A refusal on a session this call `created` is about it. One on a reused
+/// session may predate a gate someone just fixed, so it is trusted only once
+/// the operator has had its re-check ([`STALE_REFUSAL`]) and still says so.
+fn stuck_verdict(
+    job: &str,
+    namespace: &str,
+    secret: &str,
+    refusal: Option<&str>,
+    created: bool,
+    waited: Duration,
+) -> Option<OpsError> {
+    let projected = secret.starts_with(&format!("{job}-creds-"));
+    let refusal = refusal.filter(|_| created || waited > STALE_REFUSAL);
+    match (projected, refusal) {
+        (true, Some(reason)) => Some(OpsError::SessionCredsRefused {
+            job: job.to_string(),
+            reason: reason.to_string(),
+        }),
+        (true, None) => None,
+        (false, _) => {
+            (waited > MISSING_SECRET_GRACE).then(|| stuck_on_secret(job, namespace, secret))
+        }
+    }
 }
 
 /// The error for a session pod stuck on `secret`: the operator's missing copy,
@@ -1028,6 +1118,88 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_copy_waits_out_the_operators_retry_unless_it_refused() {
+        let job = "kopiur-browse-nas-0123abcd";
+        let copy = format!("{job}-creds-0");
+        let long = Duration::from_secs(120);
+        assert!(
+            stuck_verdict(job, "vaultwarden", &copy, None, true, long).is_none(),
+            "a copy not written yet may be a retry away: keep waiting"
+        );
+        let refused = stuck_verdict(
+            job,
+            "vaultwarden",
+            &copy,
+            Some("namespace vaultwarden is not in allowedNamespaces. Fix: add it there"),
+            true,
+            Duration::from_secs(2),
+        )
+        .expect("a refusal ends the wait at once");
+        assert!(
+            matches!(&refused, OpsError::SessionCredsRefused { .. }),
+            "{refused}"
+        );
+        assert!(
+            refused.to_string().contains("Fix: add it there"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn only_a_live_pod_of_this_very_job_is_the_session() {
+        // A session Job's name is reused, so the previous session's pod may
+        // still be terminating under the same job-name label, with credentials
+        // this session was never given. It is not this session.
+        let pod = |owner_uid: &str, deleting: bool| -> Pod {
+            let mut v = serde_json::json!({
+                "metadata": {
+                    "name": "kopiur-browse-nas-0123abcd-x7k2p",
+                    "ownerReferences": [{
+                        "apiVersion": "batch/v1", "kind": "Job",
+                        "name": "kopiur-browse-nas-0123abcd", "uid": owner_uid,
+                        "controller": true
+                    }]
+                }
+            });
+            if deleting {
+                v["metadata"]["deletionTimestamp"] = "2026-10-11T12:00:00Z".into();
+            }
+            serde_json::from_value(v).expect("pod fixture")
+        };
+        assert!(is_session_pod(&pod("this-uid", false), "this-uid"));
+        assert!(!is_session_pod(&pod("previous-uid", false), "this-uid"));
+        assert!(!is_session_pod(&pod("this-uid", true), "this-uid"));
+    }
+
+    #[test]
+    fn a_reused_session_trusts_a_refusal_only_once_the_operator_could_recheck_it() {
+        let job = "kopiur-browse-nas-0123abcd";
+        let copy = format!("{job}-creds-0");
+        let refusal = Some("not allowed. Fix: allow it");
+        // A session this call created: any refusal on it is about it.
+        assert!(stuck_verdict(job, "ns", &copy, refusal, true, Duration::from_secs(1)).is_some());
+        // A reused one may carry a refusal from before the gate was fixed.
+        assert!(stuck_verdict(job, "ns", &copy, refusal, false, Duration::from_secs(1)).is_none());
+        assert!(
+            stuck_verdict(job, "ns", &copy, refusal, false, Duration::from_secs(25)).is_some(),
+            "past the operator's re-check, a refusal still there is current"
+        );
+    }
+
+    #[test]
+    fn a_missing_secret_of_the_namespace_itself_ends_the_wait_after_the_grace() {
+        let job = "kopiur-browse-nas-0123abcd";
+        assert!(stuck_verdict(job, "media", "creds", None, true, Duration::from_secs(5)).is_none());
+        assert!(matches!(
+            stuck_verdict(job, "media", "creds", None, true, Duration::from_secs(31)),
+            Some(OpsError::SessionCredsMissing {
+                projected: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn a_missing_copy_points_at_the_operator_and_a_missing_secret_at_the_namespace() {
         let job = "kopiur-browse-nas-0123abcd";
         let copy = stuck_on_secret(job, "vaultwarden", &format!("{job}-creds-0")).to_string();
@@ -1037,6 +1209,69 @@ mod tests {
         );
         let own = stuck_on_secret(job, "vaultwarden", "creds").to_string();
         assert!(own.contains("create it in vaultwarden"), "{own}");
+    }
+
+    #[tokio::test]
+    async fn joining_a_session_checks_this_snapshots_gates_too() {
+        // Sessions are shared per repository, so a second snapshot may find one
+        // already running. Its own gates must still be checked, before any
+        // apiserver call: this client points at nothing, so reaching it would
+        // be a connection error, not the refusal.
+        use kopiur_api::backend::{Backend, S3Backend};
+        use kopiur_api::common::{Encryption, SecretKeyRef};
+        let config = kube::Config::new("http://127.0.0.1:1".parse().unwrap());
+        let ctx = OpsCtx {
+            client: kube::Client::try_from(config).unwrap(),
+            namespace: "vaultwarden".into(),
+            scope: crate::ctx::Scope::Namespace("vaultwarden".into()),
+            field_manager: "test".into(),
+        };
+        let target = BrowseTarget {
+            snapshot: "never-opted-in".into(),
+            namespace: "vaultwarden".into(),
+            kopia_snapshot_id: "kdead".into(),
+            repo: RepoHandle {
+                kind: RepositoryKind::ClusterRepository,
+                name: "rustfs".into(),
+                uid: "u1".into(),
+                namespace: None,
+                backend: Backend::S3(S3Backend {
+                    bucket: "b".into(),
+                    prefix: None,
+                    endpoint: None,
+                    region: None,
+                    auth: None,
+                    tls: None,
+                }),
+                encryption: Encryption {
+                    password_secret_ref: SecretKeyRef {
+                        name: "creds".into(),
+                        key: None,
+                        namespace: Some("kopiur".into()),
+                    },
+                },
+                mover_defaults: None,
+            },
+            ca_bundle_pem: None,
+            projection: crate::browse::resolve::SessionProjection {
+                allowed: true,
+                opted_in: false,
+            },
+        };
+        let err = ExecSession::ensure(
+            &ctx,
+            &target,
+            Duration::from_secs(60),
+            &MoverImageSource::Fixed("mover".into()),
+            &TracingProgress,
+        )
+        .await
+        .err()
+        .expect("a snapshot that never opted in must be refused");
+        assert!(
+            matches!(err, OpsError::CredsOutsideSessionNamespace { .. }),
+            "refused before touching the apiserver, got: {err}"
+        );
     }
 
     #[test]

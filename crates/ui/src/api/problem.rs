@@ -351,6 +351,7 @@ fn ui_fix(error: &OpsError) -> Option<&'static str> {
         | OpsError::ClusterRepoSecretNamespaceMissing { .. }
         | OpsError::SessionPodFailed { .. }
         | OpsError::SessionCredsMissing { .. }
+        | OpsError::SessionCredsRefused { .. }
         | OpsError::SessionNotReady { .. }
         | OpsError::SessionExec { .. }
         | OpsError::InvalidPath { .. }
@@ -393,6 +394,7 @@ fn kube_reason(error: &OpsError) -> Option<String> {
         | OpsError::ClusterRepoSecretNamespaceMissing { .. }
         | OpsError::SessionPodFailed { .. }
         | OpsError::SessionCredsMissing { .. }
+        | OpsError::SessionCredsRefused { .. }
         | OpsError::SessionNotReady { .. }
         | OpsError::SessionExec { .. }
         | OpsError::InvalidPath { .. }

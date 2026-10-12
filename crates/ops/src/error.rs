@@ -385,6 +385,16 @@ pub enum OpsError {
         projected: bool,
     },
 
+    /// The operator will not copy the credentials a browse session needs, and
+    /// recorded why on the session Job.
+    #[error("the browse session (Job {job}) cannot load its credentials. {reason}")]
+    SessionCredsRefused {
+        /// The session Job name.
+        job: String,
+        /// The operator's reason, ending in its fix.
+        reason: String,
+    },
+
     /// Waiting for the session pod to become ready timed out.
     #[error(
         "timed out after {after} waiting for the browse session pod (Job {job}). \
@@ -553,6 +563,7 @@ impl OpsError {
             | OpsError::SessionExec { .. }
             | OpsError::SessionPodFailed { .. }
             | OpsError::SessionCredsMissing { .. }
+            | OpsError::SessionCredsRefused { .. }
             | OpsError::MoverImageUnresolvable { .. }
             | OpsError::OperatorNamespaceUnresolvable { .. }
             | OpsError::CaBundleUnresolvable { .. }
