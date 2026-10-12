@@ -38,8 +38,10 @@
 //! 8. **A browse session gets its own copy, which goes with the session.** `ls` on a
 //!    projection-on snapshot in the creds-less namespace starts a session Job that
 //!    names `<job>-creds-0`; the operator writes it, owned by the Job, the listing
-//!    succeeds, and ending the session takes the copy with it. With the repository's
-//!    `allowed` turned off, a new session is refused, naming that setting.
+//!    succeeds, and ending the session takes the copy with it. A namespace outside
+//!    `allowedNamespaces` is refused with that reason at once, and fixing it lets a
+//!    retry through. With the repository's `allowed` turned off, a new session is
+//!    refused, naming that setting.
 //!
 //! Scenario 7 is the ordering the others structurally cannot catch: every one of them
 //! deletes the Snapshot before the policy, keeping the recipe alive exactly as long as
@@ -1076,20 +1078,49 @@ async fn a_browse_session_reads_through_a_copy_that_goes_with_it() {
     let sessions =
         kube::api::ListParams::default().labels("kopiur.home-operations.com/session=browse");
 
-    // Rerun hygiene: a killed run leaves a warm session and its copy behind.
+    // Rerun hygiene. A killed run leaves a warm session, a policy and a snapshot
+    // behind, and maybe the repository with a gate closed. The repository goes
+    // first and open, since a policy cannot finish deleting without it; then the
+    // leftovers are deleted and waited out.
     let _ = run_cli(&["-n", PROJECTION_NS, "session", "end", backup]);
+    match crepos.get_opt(crepo).await.unwrap() {
+        Some(_) => {
+            crepos
+                .patch(
+                    crepo,
+                    &PatchParams::default(),
+                    &Patch::Merge(serde_json::json!({ "spec": {
+                        "credentialProjection": { "allowed": true },
+                        "allowedNamespaces": { "list": null, "all": true }
+                    }})),
+                )
+                .await
+                .expect("reopen the ClusterRepository's gates");
+        }
+        None => {
+            crepos
+                .create(
+                    &PostParams::default(),
+                    &cr(s3_cluster_repository_json(crepo, "kopiur-proj-browse")),
+                )
+                .await
+                .expect("create S3 ClusterRepository");
+        }
+    }
     let _ = backups.delete(backup, &DeleteParams::default()).await;
     let _ = configs.delete(cfg, &DeleteParams::default()).await;
-
-    if crepos.get_opt(crepo).await.unwrap().is_none() {
-        crepos
-            .create(
-                &PostParams::default(),
-                &cr(s3_cluster_repository_json(crepo, "kopiur-proj-browse")),
-            )
-            .await
-            .expect("create S3 ClusterRepository");
-    }
+    wait_until(
+        "a previous attempt's policy and snapshot to be gone",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let gone =
+                backups.get_opt(backup).await?.is_none() && configs.get_opt(cfg).await?.is_none();
+            Ok::<_, kube::Error>(gone.then_some(()))
+        },
+    )
+    .await
+    .expect("a previous attempt's objects should be deletable");
     wait_phase(&crepos, crepo, "Ready")
         .await
         .expect("ClusterRepository should bootstrap to Ready");
@@ -1176,7 +1207,53 @@ async fn a_browse_session_reads_through_a_copy_that_goes_with_it() {
     .await
     .expect("the copy must be garbage-collected with the session Job");
 
-    // 4. With the owner's allow withdrawn, a new session is refused, naming it.
+    // 4. A gate only the operator can check (allowedNamespaces) is refused with
+    //    its reason, read off the session Job at once, and once fixed the
+    //    operator's re-check lets a retry through the same session.
+    let set_namespaces = |namespaces: serde_json::Value| {
+        let crepos = crepos.clone();
+        async move {
+            crepos
+                .patch(
+                    crepo,
+                    &PatchParams::default(),
+                    &Patch::Merge(serde_json::json!({
+                        "spec": { "allowedNamespaces": namespaces }
+                    })),
+                )
+                .await
+                .expect("change allowedNamespaces")
+        }
+    };
+    // A merge patch: null the other arm, or the union holds two keys.
+    set_namespaces(serde_json::json!({ "all": null, "list": [E2E_NAMESPACE] })).await;
+    let refused_at = std::time::Instant::now();
+    let out = run_cli(&["-n", PROJECTION_NS, "ls", backup]);
+    assert!(
+        !out.success,
+        "ls must be refused while the namespace is outside allowedNamespaces.\nstdout: {}\nstderr: {}",
+        out.stdout, out.stderr
+    );
+    assert!(
+        out.stderr.contains("allowedNamespaces"),
+        "the operator's refusal must reach the person browsing: {}",
+        out.stderr
+    );
+    assert!(
+        refused_at.elapsed() < std::time::Duration::from_secs(120),
+        "a refusal ends the wait, not the readiness deadline"
+    );
+    set_namespaces(serde_json::json!({ "list": null, "all": true })).await;
+    let out = run_cli(&["-n", PROJECTION_NS, "ls", backup]);
+    assert!(
+        out.success,
+        "once allowed, the operator's re-check must let the session start.\nstderr: {}",
+        out.stderr
+    );
+    let out = run_cli(&["-n", PROJECTION_NS, "session", "end", backup]);
+    assert!(out.success, "session end failed: {}", out.stderr);
+
+    // 5. With the owner's allow withdrawn, a new session is refused, naming it.
     crepos
         .patch(
             crepo,
@@ -1195,7 +1272,19 @@ async fn a_browse_session_reads_through_a_copy_that_goes_with_it() {
         out.stderr
     );
 
+    // The repository last, once nothing that needs it to finish deleting is left.
     let _ = backups.delete(backup, &DeleteParams::default()).await;
     let _ = configs.delete(cfg, &DeleteParams::default()).await;
+    let _ = wait_until(
+        "the policy and snapshot to be gone before their repository",
+        default_timeout(),
+        poll_interval(),
+        || async {
+            let gone =
+                backups.get_opt(backup).await?.is_none() && configs.get_opt(cfg).await?.is_none();
+            Ok::<_, kube::Error>(gone.then_some(()))
+        },
+    )
+    .await;
     let _ = crepos.delete(crepo, &DeleteParams::default()).await;
 }

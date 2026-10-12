@@ -293,7 +293,9 @@ objects:
 The copy is named `<session job>-creds-<n>` and belongs to the session Job, so it
 is deleted with the session: when you stop it, when it expires, or with the
 repository. When a gate is closed the console says which, and the session Job
-carries a Warning Event saying the same. If you would rather not copy credentials
+carries a Warning Event saying the same. The operator checks a refused session
+again every 15 seconds while it lives, so fixing the gate and retrying lets it
+start without ending the session first. If you would rather not copy credentials
 at all, `kubectl kopiur browse --local` reads from your own machine instead.
 
 ## Caps, and what a user sees when they hit one
